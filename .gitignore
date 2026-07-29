@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Local runtime and test artifacts
+*.log
+MacroKnot-Probe-*.png
+
+# Editor and agent runtime state
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.omx/
