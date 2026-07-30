@@ -30,6 +30,7 @@ public struct RawInputEvent: Codable, Equatable, Sendable {
     public var keyCode: UInt16?
     public var characters: String?
     public var modifierFlags: UInt64
+    public var isKeyboardRepeat: Bool
 
     public init(
         kind: RawInputEventKind,
@@ -41,7 +42,8 @@ public struct RawInputEvent: Codable, Equatable, Sendable {
         scrollDeltaY: Double = 0,
         keyCode: UInt16? = nil,
         characters: String? = nil,
-        modifierFlags: UInt64 = 0
+        modifierFlags: UInt64 = 0,
+        isKeyboardRepeat: Bool = false
     ) {
         self.kind = kind
         self.timestampNanoseconds = timestampNanoseconds
@@ -53,6 +55,7 @@ public struct RawInputEvent: Codable, Equatable, Sendable {
         self.keyCode = keyCode
         self.characters = characters
         self.modifierFlags = modifierFlags
+        self.isKeyboardRepeat = isKeyboardRepeat
     }
 }
 
@@ -61,20 +64,30 @@ public struct InputActionReducer: Sendable {
 
     private var mouseDown: RawInputEvent?
     private var mouseDragged = false
+    private var dragEvents: [RawInputEvent] = []
     private var lastActionTimestampNanoseconds: UInt64?
+    private var previousClickActionID: UUID?
+    private var actionStartTimestampNanoseconds: UInt64?
+    private var pressedModifierKeyCodes: Set<UInt16> = []
 
-    public init(mode: InputRecordingMode) {
+    public init(
+        mode: InputRecordingMode,
+        recordingStartTimestampNanoseconds: UInt64? = nil
+    ) {
         self.mode = mode
+        lastActionTimestampNanoseconds = recordingStartTimestampNanoseconds
     }
 
     public mutating func consume(_ event: RawInputEvent) -> [MacroAction] {
+        actionStartTimestampNanoseconds = nil
         let actions = reduce(event)
         guard !actions.isEmpty else { return [] }
 
         var timedActions = actions
+        let startTimestamp = actionStartTimestampNanoseconds ?? event.timestampNanoseconds
         if let previousTimestamp = lastActionTimestampNanoseconds,
-           event.timestampNanoseconds > previousTimestamp {
-            let elapsedMilliseconds = (event.timestampNanoseconds - previousTimestamp) / 1_000_000
+           startTimestamp > previousTimestamp {
+            let elapsedMilliseconds = (startTimestamp - previousTimestamp) / 1_000_000
             if elapsedMilliseconds > 0 {
                 timedActions[0].delayBeforeMilliseconds = elapsedMilliseconds
             }
@@ -83,15 +96,35 @@ public struct InputActionReducer: Sendable {
         return timedActions
     }
 
+    @discardableResult
+    public mutating func consume(
+        _ event: RawInputEvent,
+        appendingTo recordedActions: inout [MacroAction]
+    ) -> [MacroAction] {
+        let reducedActions = consume(event)
+        for var action in reducedActions {
+            if action.kind == .doubleClick,
+               let index = recordedActions.firstIndex(where: { $0.id == action.id }) {
+                action.delayBeforeMilliseconds = recordedActions[index].delayBeforeMilliseconds
+                recordedActions[index] = action
+            } else {
+                recordedActions.append(action)
+            }
+        }
+        return reducedActions
+    }
+
     private mutating func reduce(_ event: RawInputEvent) -> [MacroAction] {
         switch event.kind {
         case .leftMouseDown, .rightMouseDown:
             mouseDown = event
             mouseDragged = false
+            dragEvents = [event]
             return []
         case .leftMouseDragged, .rightMouseDragged:
             mouseDragged = true
-            return movementAction(for: event)
+            dragEvents.append(event)
+            return []
         case .leftMouseUp, .rightMouseUp:
             return finishMouseInteraction(with: event)
         case .mouseMoved:
@@ -111,10 +144,35 @@ public struct InputActionReducer: Sendable {
             return [.keyboard(
                 keyCode: keyCode,
                 characters: event.characters,
-                modifierFlags: event.modifierFlags
+                modifierFlags: event.modifierFlags,
+                eventKind: .keyDown,
+                isRepeat: event.isKeyboardRepeat
             )]
-        case .keyUp, .flagsChanged:
-            return []
+        case .keyUp:
+            guard let keyCode = event.keyCode else { return [] }
+            return [.keyboard(
+                keyCode: keyCode,
+                characters: event.characters,
+                modifierFlags: event.modifierFlags,
+                eventKind: .keyUp
+            )]
+        case .flagsChanged:
+            guard let keyCode = event.keyCode,
+                  let flagMask = Self.modifierFlagMask(for: keyCode) else { return [] }
+            let eventKind: KeyboardPayload.EventKind
+            if event.modifierFlags & flagMask == 0 || pressedModifierKeyCodes.contains(keyCode) {
+                eventKind = .keyUp
+                pressedModifierKeyCodes.remove(keyCode)
+            } else {
+                eventKind = .keyDown
+                pressedModifierKeyCodes.insert(keyCode)
+            }
+            return [.keyboard(
+                keyCode: keyCode,
+                characters: nil,
+                modifierFlags: event.modifierFlags,
+                eventKind: eventKind
+            )]
         }
     }
 
@@ -122,30 +180,58 @@ public struct InputActionReducer: Sendable {
         defer {
             mouseDown = nil
             mouseDragged = false
+            dragEvents = []
         }
         guard let mouseDown else { return [] }
 
         if mouseDragged {
+            actionStartTimestampNanoseconds = mouseDown.timestampNanoseconds
+            dragEvents.append(event)
+            let path = dragEvents.map { dragEvent in
+                TimedScreenPoint(
+                    point: dragEvent.location,
+                    offsetMilliseconds: elapsedMilliseconds(
+                        from: mouseDown.timestampNanoseconds,
+                        to: dragEvent.timestampNanoseconds
+                    )
+                )
+            }
             return [MacroAction(
                 kind: .drag,
                 targetStrategy: .screenCoordinate,
-                mouse: MousePayload(start: mouseDown.location, end: event.location)
+                mouse: MousePayload(
+                    start: mouseDown.location,
+                    end: event.location,
+                    path: path,
+                    durationMilliseconds: path.last?.offsetMilliseconds,
+                    buttonNumber: mouseDown.buttonNumber
+                )
             )]
         }
 
-        let kind: MacroAction.Kind
         if event.kind == .rightMouseUp || event.buttonNumber == 1 {
-            kind = .rightClick
-        } else if event.clickCount >= 2 {
-            kind = .doubleClick
-        } else {
-            kind = .click
+            previousClickActionID = nil
+            return [.click(
+                kind: .rightClick,
+                point: event.location,
+                strategy: .screenCoordinate
+            )]
         }
-        return [.click(
-            kind: kind,
+
+        var action = MacroAction.click(
+            kind: event.clickCount >= 2 ? .doubleClick : .click,
             point: event.location,
             strategy: .screenCoordinate
-        )]
+        )
+        if event.clickCount >= 2 {
+            if let previousClickActionID {
+                action.id = previousClickActionID
+            }
+            previousClickActionID = nil
+        } else {
+            previousClickActionID = action.id
+        }
+        return [action]
     }
 
     private func movementAction(for event: RawInputEvent) -> [MacroAction] {
@@ -155,5 +241,21 @@ public struct InputActionReducer: Sendable {
             targetStrategy: .screenCoordinate,
             mouse: MousePayload(start: event.location)
         )]
+    }
+
+    private func elapsedMilliseconds(from start: UInt64, to end: UInt64) -> UInt64 {
+        guard end > start else { return 0 }
+        return (end - start) / 1_000_000
+    }
+
+    private static func modifierFlagMask(for keyCode: UInt16) -> UInt64? {
+        switch keyCode {
+        case 54, 55: return 0x0010_0000
+        case 56, 60: return 0x0002_0000
+        case 58, 61: return 0x0008_0000
+        case 59, 62: return 0x0004_0000
+        case 57: return 0x0001_0000
+        default: return nil
+        }
     }
 }

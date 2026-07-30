@@ -26,6 +26,11 @@ let package = Package(
             dependencies: ["MacroKnotCore"],
             path: "Tests/MacroKnotCoreTests"
         ),
+        .testTarget(
+            name: "MacroKnotAppTests",
+            dependencies: ["MacroKnotApp", "MacroKnotCore"],
+            path: "Tests/MacroKnotAppTests"
+        ),
     ],
     swiftLanguageModes: [.v5]
 )

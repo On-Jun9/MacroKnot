@@ -16,6 +16,14 @@ final class PermissionState: ObservableObject {
             kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false,
         ] as CFDictionary)
         screenCaptureGranted = CGPreflightScreenCaptureAccess()
+        RuntimeEventLogger.record(
+            "permission_state",
+            result: accessibilityGranted ? "PASS" : "FAIL",
+            fields: [
+                "accessibility": String(accessibilityGranted),
+                "screen_capture": String(screenCaptureGranted),
+            ]
+        )
     }
 
     func openAccessibilitySettings() {
