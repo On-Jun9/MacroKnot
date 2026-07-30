@@ -7,26 +7,68 @@ import SwiftUI
 
 struct DebugUISnapshotRoot: View {
     @ObservedObject var permissions: PermissionState
-    private let configuration = UISnapshotConfiguration.current
+    @StateObject private var libraryStore: MacroLibraryStore
+    private let configuration: UISnapshotConfiguration
+
+    init(permissions: PermissionState) {
+        self.permissions = permissions
+        let configuration = UISnapshotConfiguration.current
+        self.configuration = configuration
+        let records: [MacroLibraryRecord]
+        switch configuration.fixture {
+        case .empty:
+            records = []
+        default:
+            records = Self.previewRecords
+        }
+        _libraryStore = StateObject(
+            wrappedValue: MacroLibraryStore(
+                previewRecords: records,
+                recoverableDraft: configuration.fixture == .draftRecovery
+                    ? Self.previewDraft
+                    : nil,
+                errorMessage: configuration.fixture == .error
+                    ? "보관함 파일 일부를 읽지 못했습니다. 파일 형식을 확인해 주세요."
+                    : nil
+            )
+        )
+    }
 
     var body: some View {
-        fixtureView
-            .preferredColorScheme(configuration.colorScheme)
-            .background {
-                UISnapshotCaptureView()
-            }
+        if configuration.isCaptureRequested {
+            fixtureView
+                .preferredColorScheme(configuration.colorScheme)
+                .background {
+                    UISnapshotCaptureView()
+                }
+        } else {
+            LibraryView(permissions: permissions)
+        }
     }
 
     @ViewBuilder
     private var fixtureView: some View {
         switch configuration.fixture {
         case .empty:
-            ContentView(permissions: permissions)
+            LibraryView(permissions: permissions)
+                .environmentObject(libraryStore)
         case .populated:
-            ContentView(
+            LibraryView(permissions: permissions)
+                .environmentObject(libraryStore)
+        case .playing:
+            LibraryView(permissions: permissions, previewState: .playing(iteration: 2))
+                .environmentObject(libraryStore)
+        case .error:
+            LibraryView(
                 permissions: permissions,
-                initialDocument: Self.populatedDocument
+                previewState: .failed(
+                    "디스플레이 해상도·배율·배치가 매크로 작성 당시와 달라 재생할 수 없습니다."
+                )
             )
+            .environmentObject(libraryStore)
+        case .draftRecovery:
+            LibraryView(permissions: permissions)
+                .environmentObject(libraryStore)
         case .recording:
             ContentView(
                 permissions: permissions,
@@ -36,18 +78,18 @@ struct DebugUISnapshotRoot: View {
                     lastEvent: "마우스 이동 → 포인터 경로"
                 )
             )
-        case .playing:
+        case .macroEditor:
             ContentView(
                 permissions: permissions,
                 initialDocument: Self.populatedDocument,
-                previewState: .playing
-            )
-        case .error:
-            ContentView(
-                permissions: permissions,
-                initialDocument: Self.populatedDocument,
-                previewState: .failed(
-                    "디스플레이 해상도·배율·배치가 매크로 작성 당시와 달라 재생할 수 없습니다."
+                editorConfiguration: MacroEditorConfiguration(
+                    startRecording: false,
+                    isPlaybackRunning: { false },
+                    onRecordingRequestHandled: {},
+                    onRecordingStateChanged: { _ in },
+                    onDraftChanged: { _ in },
+                    onSave: { _ in },
+                    onCancel: {}
                 )
             )
         case .editor:
@@ -80,6 +122,35 @@ struct DebugUISnapshotRoot: View {
             name: "새 업무 흐름 녹화",
             actions: Array(sampleActions.prefix(3)),
             displayConfiguration: DisplayConfigurationProvider.current()
+        )
+    }
+
+    private static var previewRecords: [MacroLibraryRecord] {
+        let documents = [
+            populatedDocument,
+            MacroDocument(
+                name: "주간 정산 자료 내려받기",
+                actions: Array(sampleActions.prefix(6)),
+                displayConfiguration: DisplayConfigurationProvider.current()
+            ),
+            MacroDocument(
+                name: "고객 문의 화면 캡처",
+                actions: Array(sampleActions.suffix(5)),
+                displayConfiguration: DisplayConfigurationProvider.current()
+            ),
+        ]
+        return documents.enumerated().map { index, document in
+            let date = Date(timeIntervalSince1970: 1_785_346_800 - Double(index * 86_400))
+            return MacroLibraryRecord(document: document, createdAt: date, modifiedAt: date)
+        }
+    }
+
+    private static var previewDraft: MacroDraftRecord {
+        MacroDraftRecord(
+            mode: .edit,
+            document: populatedDocument,
+            originalCreatedAt: Date(timeIntervalSince1970: 1_785_260_400),
+            updatedAt: Date(timeIntervalSince1970: 1_785_346_800)
         )
     }
 
@@ -176,6 +247,8 @@ private struct UISnapshotConfiguration {
         case playing
         case error
         case editor
+        case macroEditor = "macro-editor"
+        case draftRecovery = "draft-recovery"
         case coordinatePicker = "coordinate-picker"
         case coordinatePickerFlow = "coordinate-picker-flow"
         case coordinatePickerCancelFlow = "coordinate-picker-cancel-flow"
@@ -186,12 +259,16 @@ private struct UISnapshotConfiguration {
 
     let fixture: Fixture
     let colorScheme: ColorScheme?
+    let isCaptureRequested: Bool
 
     static var current: Self {
         Self(
             fixture: value(for: "--ui-snapshot-fixture=")
                 .flatMap(Fixture.init(rawValue:)) ?? .empty,
-            colorScheme: colorScheme(from: value(for: "--ui-snapshot-appearance="))
+            colorScheme: colorScheme(from: value(for: "--ui-snapshot-appearance=")),
+            isCaptureRequested: ProcessInfo.processInfo.arguments.contains {
+                $0.hasPrefix("--ui-snapshot-output=")
+            }
         )
     }
 

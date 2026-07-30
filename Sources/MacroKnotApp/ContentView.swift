@@ -10,6 +10,22 @@ enum WorkspacePreviewState {
     case failed(String)
 }
 
+struct MacroEditorConfiguration {
+    let startRecording: Bool
+    let isPlaybackRunning: () -> Bool
+    let onRecordingRequestHandled: () -> Void
+    let onRecordingStateChanged: (Bool) -> Void
+    let onDraftChanged: (MacroDocument) -> Void
+    let onSave: (MacroDocument) throws -> Void
+    let onCancel: () -> Void
+}
+
+extension Notification.Name {
+    static let macroKnotToggleEditorRecording = Notification.Name(
+        "MacroKnotToggleEditorRecording"
+    )
+}
+
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var permissions: PermissionState
@@ -21,6 +37,9 @@ struct ContentView: View {
     @State private var selectedActionID: UUID?
     @State private var isRepeatRangePresented = false
     @State private var isDeleteAllConfirmationPresented = false
+    @State private var isCancelConfirmationPresented = false
+    @State private var editorErrorMessage: String?
+    @State private var autosaveTask: Task<Void, Never>?
     @State private var isSidebarPresented = true
     @AppStorage(AppPreferenceKeys.excludesEventsTargetingMacroKnot)
     private var excludesEventsTargetingMacroKnot = true
@@ -32,14 +51,17 @@ struct ContentView: View {
     private var playbackShortcutRawValue = AppPreferenceDefaults.playbackShortcut.rawValue
 
     private let previewState: WorkspacePreviewState
+    private let editorConfiguration: MacroEditorConfiguration?
 
     init(
         permissions: PermissionState,
         initialDocument: MacroDocument? = nil,
-        previewState: WorkspacePreviewState = .live
+        previewState: WorkspacePreviewState = .live,
+        editorConfiguration: MacroEditorConfiguration? = nil
     ) {
         self.permissions = permissions
         self.previewState = previewState
+        self.editorConfiguration = editorConfiguration
         _documentController = StateObject(
             wrappedValue: DocumentController(initialDocument: initialDocument)
         )
@@ -93,14 +115,36 @@ struct ContentView: View {
         } message: {
             Text("현재 문서의 액션이 모두 삭제됩니다. 이 작업은 되돌릴 수 없습니다.")
         }
+        .alert("초안 편집을 취소할까요?", isPresented: $isCancelConfirmationPresented) {
+            Button("초안 삭제", role: .destructive) {
+                editorConfiguration?.onCancel()
+            }
+            Button("계속 편집", role: .cancel) {}
+        } message: {
+            Text("지금까지 편집한 초안이 삭제됩니다.")
+        }
         .onAppear(perform: handleAppearance)
-        .onDisappear(perform: globalCommandMonitor.stop)
+        .onDisappear {
+            globalCommandMonitor.stop()
+            autosaveTask?.cancel()
+            if recorder.isRecording {
+                recorder.stop()
+                documentController.appendRecordedActions(recorder.actions)
+                editorConfiguration?.onRecordingStateChanged(false)
+            }
+            if editorConfiguration != nil {
+                editorConfiguration?.onDraftChanged(documentController.document)
+            }
+        }
         .onChange(of: permissions.accessibilityGranted) { _, granted in
-            if granted {
+            if granted, editorConfiguration == nil {
                 startGlobalCommandMonitor()
             } else {
                 globalCommandMonitor.stop()
             }
+        }
+        .onChange(of: recorder.isRecording) { _, isRecording in
+            editorConfiguration?.onRecordingStateChanged(isRecording)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
@@ -111,14 +155,16 @@ struct ContentView: View {
             guard let selectedActionID, !actionIDs.contains(selectedActionID) else { return }
             self.selectedActionID = nil
         }
+        .onChange(of: documentController.document) { _, document in
+            scheduleDraftAutosave(document)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .macroKnotToggleEditorRecording)) { _ in
+            guard editorConfiguration != nil else { return }
+            toggleRecording(triggeredByGlobalShortcut: true)
+        }
         .focusedSceneValue(
-            \.documentFileCommands,
-            DocumentFileCommands(
-                newDocument: newDocument,
-                openDocument: openDocument,
-                saveDocument: documentController.saveDocument,
-                saveDocumentAs: documentController.saveDocumentAs
-            )
+            \.macroCommands,
+            focusedMacroCommands
         )
     }
 
@@ -138,39 +184,38 @@ struct ContentView: View {
             .help(isSidebarPresented ? "사이드바 가리기" : "사이드바 보기")
         }
 
-        ToolbarItemGroup(placement: .primaryAction) {
-            Button(action: { toggleRecording() }) {
-                Label(
-                    isRecordingPresented ? "녹화 중지" : "녹화 시작",
-                    systemImage: isRecordingPresented ? "stop.fill" : "record.circle"
-                )
-            }
-            .tint(.red)
-            .disabled(!isRecordingPresented && displayedPlayerState == .running)
-            .help(isRecordingPresented ? "현재 녹화를 마칩니다" : "사용자 입력 녹화를 시작합니다")
-
-            Button(action: startPlayback) {
-                Label(
-                    displayedPlayerState == .running ? "실행 중" : "재생",
-                    systemImage: "play.fill"
-                )
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(!canStartPlayback)
-            .help("현재 액션을 처음부터 재생합니다")
-
-            if displayedPlayerState == .running {
-                Button(role: .destructive, action: player.stop) {
-                    Label("중지", systemImage: "stop.fill")
+        if editorConfiguration == nil {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button(action: { toggleRecording() }) {
+                    Label(
+                        isRecordingPresented ? "녹화 중지" : "녹화 시작",
+                        systemImage: isRecordingPresented ? "stop.fill" : "record.circle"
+                    )
                 }
-                .keyboardShortcut(.escape, modifiers: .control)
-                .help("재생 중지 (⌃Esc)")
-            }
+                .tint(.red)
+                .disabled(!isRecordingPresented && displayedPlayerState == .running)
+                .help(isRecordingPresented ? "현재 녹화를 마칩니다" : "사용자 입력 녹화를 시작합니다")
 
-            SettingsLink {
-                Label("설정", systemImage: "gearshape")
+                Button(action: startPlayback) {
+                    Label(
+                        displayedPlayerState == .running ? "실행 중" : "재생",
+                        systemImage: "play.fill"
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canStartPlayback)
+
+                if displayedPlayerState == .running {
+                    Button(role: .destructive, action: player.stop) {
+                        Label("중지", systemImage: "stop.fill")
+                    }
+                    .keyboardShortcut(.escape, modifiers: .control)
+                }
+
+                SettingsLink {
+                    Label("설정", systemImage: "gearshape")
+                }
             }
-            .help("MacroKnot 설정")
         }
     }
 
@@ -180,6 +225,10 @@ struct ContentView: View {
             Divider()
             activityBanner
             actionWorkspace
+            if editorConfiguration != nil {
+                Divider()
+                editorFooter
+            }
         }
         .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -190,6 +239,7 @@ struct ContentView: View {
                 TextField("매크로 이름", text: $documentController.document.name)
                     .textFieldStyle(.plain)
                     .font(.title2.weight(.semibold))
+                    .foregroundStyle(.primary)
                     .accessibilityLabel("매크로 이름")
 
                 HStack(spacing: 8) {
@@ -303,7 +353,21 @@ struct ContentView: View {
 
             Spacer()
 
+            if editorConfiguration != nil {
+                Button(action: { toggleRecording() }) {
+                    Label(
+                        isRecordingPresented ? "녹화 중지" : "녹화 시작",
+                        systemImage: isRecordingPresented ? "stop.fill" : "record.circle"
+                    )
+                }
+                .tint(.red)
+                .fixedSize()
+                .disabled(!isRecordingPresented && editorConfiguration?.isPlaybackRunning() == true)
+                .help(isRecordingPresented ? "현재 녹화를 마칩니다" : "사용자 입력 녹화를 시작합니다")
+            }
+
             addActionMenu
+                .fixedSize()
                 .disabled(isRecordingPresented)
 
             Button("편집", systemImage: "slider.horizontal.3") {
@@ -355,6 +419,27 @@ struct ContentView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
+    }
+
+    private var editorFooter: some View {
+        HStack(spacing: 10) {
+            Text("편집 내용은 임시 초안으로 자동 저장됩니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("취소") {
+                isCancelConfirmationPresented = true
+            }
+            Button(action: saveEditor) {
+                Label("보관함에 저장", systemImage: "checkmark")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isRecordingPresented)
+            .keyboardShortcut("s", modifiers: .command)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(.bar)
     }
 
     private var addActionMenu: some View {
@@ -504,27 +589,31 @@ struct ContentView: View {
                         .foregroundStyle(.tertiary)
                 }
 
-                SidebarSection(title: "권한", systemImage: "checkmark.shield") {
-                    PermissionIndicator(
-                        title: "손쉬운 사용",
-                        granted: permissions.accessibilityGranted,
-                        action: permissions.openAccessibilitySettings
-                    )
-                    PermissionIndicator(
-                        title: "화면 캡처",
-                        granted: permissions.screenCaptureGranted,
-                        action: permissions.openScreenCaptureSettings
-                    )
-                    Button("상태 새로고침", systemImage: "arrow.clockwise", action: permissions.refresh)
-                        .buttonStyle(.link)
+                if editorConfiguration == nil {
+                    SidebarSection(title: "권한", systemImage: "checkmark.shield") {
+                        PermissionIndicator(
+                            title: "손쉬운 사용",
+                            granted: permissions.accessibilityGranted,
+                            action: permissions.openAccessibilitySettings
+                        )
+                        PermissionIndicator(
+                            title: "화면 캡처",
+                            granted: permissions.screenCaptureGranted,
+                            action: permissions.openScreenCaptureSettings
+                        )
+                        Button("상태 새로고침", systemImage: "arrow.clockwise", action: permissions.refresh)
+                            .buttonStyle(.link)
+                    }
                 }
 
-                SidebarSection(title: "빠른 실행", systemImage: "keyboard") {
-                    SidebarInfoRow(title: "녹화", value: recordingShortcutTitle)
-                    SidebarInfoRow(title: "재생", value: playbackShortcutTitle)
-                    SidebarInfoRow(title: "강제 중지", value: "Control + Escape")
-                    SettingsLink {
-                        Label("단축키 및 권한 설정", systemImage: "gearshape")
+                if editorConfiguration == nil {
+                    SidebarSection(title: "빠른 실행", systemImage: "keyboard") {
+                        SidebarInfoRow(title: "녹화", value: recordingShortcutTitle)
+                        SidebarInfoRow(title: "재생", value: playbackShortcutTitle)
+                        SidebarInfoRow(title: "강제 중지", value: "Control + Escape")
+                        SettingsLink {
+                            Label("단축키 및 권한 설정", systemImage: "gearshape")
+                        }
                     }
                 }
             }
@@ -609,6 +698,9 @@ struct ContentView: View {
     }
 
     private var activeErrorMessage: String? {
+        if let editorErrorMessage {
+            return editorErrorMessage
+        }
         if case .failed(let message) = previewState {
             return message
         }
@@ -708,7 +800,25 @@ struct ContentView: View {
     }
 
     private var documentLocationText: String {
-        documentController.currentURL?.lastPathComponent ?? "아직 저장되지 않음"
+        if editorConfiguration != nil { return "보관함 초안" }
+        return documentController.currentURL?.lastPathComponent ?? "아직 저장되지 않음"
+    }
+
+    private var focusedMacroCommands: MacroCommands {
+        if editorConfiguration != nil {
+            return MacroCommands(
+                newMacro: nil,
+                importMacro: nil,
+                saveMacro: saveEditor,
+                exportMacro: nil
+            )
+        }
+        return MacroCommands(
+            newMacro: newDocument,
+            importMacro: openDocument,
+            saveMacro: documentController.saveDocument,
+            exportMacro: documentController.saveDocumentAs
+        )
     }
 
     private var recordingMode: InputRecordingMode {
@@ -745,9 +855,41 @@ struct ContentView: View {
     private static let liveActionLimit = 200
 
     private func handleAppearance() {
-        startGlobalCommandMonitor()
+        if editorConfiguration == nil {
+            startGlobalCommandMonitor()
+        } else if editorConfiguration?.startRecording == true {
+            DispatchQueue.main.async {
+                editorConfiguration?.onRecordingRequestHandled()
+                toggleRecording(triggeredByGlobalShortcut: true)
+            }
+        }
         DispatchQueue.main.async {
             NSApplication.shared.keyWindow?.makeFirstResponder(nil)
+        }
+    }
+
+    private func saveEditor() {
+        guard let editorConfiguration else { return }
+        if recorder.isRecording {
+            toggleRecording()
+        }
+        do {
+            autosaveTask?.cancel()
+            try documentController.document.validate()
+            try editorConfiguration.onSave(documentController.document)
+            editorErrorMessage = nil
+        } catch {
+            editorErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func scheduleDraftAutosave(_ document: MacroDocument) {
+        guard let editorConfiguration else { return }
+        autosaveTask?.cancel()
+        autosaveTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            editorConfiguration.onDraftChanged(document)
         }
     }
 
@@ -788,8 +930,10 @@ struct ContentView: View {
             let recordedActions = recorder.actions
             documentController.appendRecordedActions(recordedActions)
             selectedActionID = recordedActions.last?.id
+            editorConfiguration?.onRecordingStateChanged(false)
             return
         }
+        guard editorConfiguration?.isPlaybackRunning() != true else { return }
         guard player.state != .running else { return }
         guard permissions.accessibilityGranted else {
             permissions.openAccessibilitySettings()
@@ -800,6 +944,7 @@ struct ContentView: View {
             excludesEventsTargetingMacroKnot: excludesEventsTargetingMacroKnot,
             suppressesInitialShortcutModifierReleases: triggeredByGlobalShortcut
         )
+        editorConfiguration?.onRecordingStateChanged(recorder.isRecording)
     }
 
     private func startPlayback() {

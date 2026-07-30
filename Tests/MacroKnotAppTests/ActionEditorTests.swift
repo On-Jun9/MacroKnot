@@ -167,6 +167,65 @@ func preventsDuplicatePlaybackAndReleasesInputsWhenStopped() async {
 
 @MainActor
 @Test
+func repeatsPlaybackForRequestedFiniteCount() async {
+    let stopMonitor = FakeStopMonitor()
+    let performer = CountingInputPerformer()
+    let player = InputPlayer(
+        globalStopMonitor: stopMonitor,
+        performerFactory: { performer }
+    )
+    let document = MacroDocument(
+        name: "3회 재생",
+        actions: [.keyboard(keyCode: 0, characters: "a", modifierFlags: 0)]
+    )
+
+    player.play(
+        document: document,
+        options: PlaybackOptions(rate: 2, repetition: .finite(3))
+    )
+    for _ in 0..<200 where player.state == .running {
+        await Task.yield()
+    }
+
+    #expect(player.state == .completed)
+    #expect(await performer.performCount == 3)
+    #expect(await performer.releaseCount == 1)
+    #expect(stopMonitor.startCount == 1)
+    #expect(stopMonitor.stopCount == 1)
+}
+
+@MainActor
+@Test
+func stopsInfinitePlaybackAndReleasesInputs() async {
+    let stopMonitor = FakeStopMonitor()
+    let performer = CountingInputPerformer(suspendsAfterCount: 3)
+    let player = InputPlayer(
+        globalStopMonitor: stopMonitor,
+        performerFactory: { performer }
+    )
+    let document = MacroDocument(
+        name: "무한 재생",
+        actions: [.keyboard(keyCode: 0, characters: "a", modifierFlags: 0)]
+    )
+
+    player.play(
+        document: document,
+        options: PlaybackOptions(rate: 1, repetition: .infinite)
+    )
+    await performer.waitUntilSuspended()
+    player.stop()
+    for _ in 0..<200 where await performer.releaseCount == 0 {
+        await Task.yield()
+    }
+
+    #expect(player.state == .stopped)
+    #expect(await performer.performCount == 3)
+    #expect(await performer.releaseCount == 1)
+    #expect(stopMonitor.stopCount == 1)
+}
+
+@MainActor
+@Test
 func completesRecordedEditedSavedLoadedAndPlayedWorkflow() async throws {
     var reducer = InputActionReducer(mode: .meaningfulActionsOnly)
     var recorded: [MacroAction] = []
@@ -342,6 +401,34 @@ private actor WorkflowRecordingPerformer: MacroActionPerforming {
 
     func perform(_ action: MacroAction) {
         kinds.append(action.kind)
+    }
+}
+
+private actor CountingInputPerformer: InputReleasingActionPerformer {
+    private(set) var performCount = 0
+    private(set) var releaseCount = 0
+    private let suspendsAfterCount: Int?
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(suspendsAfterCount: Int? = nil) {
+        self.suspendsAfterCount = suspendsAfterCount
+    }
+
+    func perform(_ action: MacroAction) async throws {
+        performCount += 1
+        guard performCount == suspendsAfterCount else { return }
+        continuation?.resume()
+        continuation = nil
+        try await Task.sleep(for: .seconds(60))
+    }
+
+    func releaseAllInputs() {
+        releaseCount += 1
+    }
+
+    func waitUntilSuspended() async {
+        if performCount == suspendsAfterCount { return }
+        await withCheckedContinuation { continuation = $0 }
     }
 }
 
