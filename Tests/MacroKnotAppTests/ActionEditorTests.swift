@@ -409,3 +409,22 @@ private final class RecordingSystemEventPoster: SystemEventPosting, @unchecked S
         return body()
     }
 }
+
+@Test
+func appliesCoordinatesPickedFromTheScreen() throws {
+    var draft = ActionEditorDraft(kind: .click)
+    draft.setStartPoint(ScreenPoint(x: 128.125, y: -242.5))
+
+    let action = try draft.makeAction()
+
+    #expect(draft.startX == "128.13")
+    #expect(draft.startY == "-242.5")
+    #expect(action.mouse?.start == ScreenPoint(x: 128.13, y: -242.5))
+}
+
+@Test
+func convertsCoreGraphicsPointerLocationWithoutChangingCoordinateSystem() {
+    let point = ScreenCoordinatePicker.screenPoint(from: CGPoint(x: -640, y: 360.5))
+
+    #expect(point == ScreenPoint(x: -640, y: 360.5))
+}

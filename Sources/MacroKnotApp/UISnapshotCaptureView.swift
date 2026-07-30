@@ -7,6 +7,7 @@ struct UISnapshotCaptureView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = UISnapshotAnchorView()
         view.outputURL = Self.outputURL
+        view.requestedContentSize = Self.requestedContentSize
         return view
     }
 
@@ -21,15 +22,43 @@ struct UISnapshotCaptureView: NSViewRepresentable {
         guard path.hasPrefix("/") else { return nil }
         return URL(fileURLWithPath: path)
     }
+
+    private static var requestedContentSize: CGSize? {
+        requestedContentSize(in: ProcessInfo.processInfo.arguments)
+    }
+
+    static func requestedContentSize(in arguments: [String]) -> CGSize? {
+        let prefix = "--ui-snapshot-window-size="
+        guard let argument = arguments.first(where: { $0.hasPrefix(prefix) }) else {
+            return nil
+        }
+        let components = argument.dropFirst(prefix.count).split(separator: "x", omittingEmptySubsequences: false)
+        guard components.count == 2,
+            let width = Double(components[0]),
+            let height = Double(components[1]),
+            width.isFinite,
+            height.isFinite,
+            width >= 320,
+            height >= 240
+        else {
+            return nil
+        }
+        return CGSize(width: width, height: height)
+    }
 }
 
 private final class UISnapshotAnchorView: NSView {
     var outputURL: URL?
+    var requestedContentSize: CGSize?
     private var isCaptureScheduled = false
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard window != nil, outputURL != nil, !isCaptureScheduled else { return }
+        guard let window, outputURL != nil, !isCaptureScheduled else { return }
+        if let requestedContentSize {
+            window.setContentSize(requestedContentSize)
+            window.center()
+        }
         isCaptureScheduled = true
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
