@@ -86,6 +86,8 @@ final class GlobalStopMonitor {
     }
 }
 
+extension GlobalStopMonitor: GlobalStopMonitoring {}
+
 private func globalStopEventTapCallback(
     proxy: CGEventTapProxy,
     type: CGEventType,

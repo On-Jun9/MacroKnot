@@ -8,18 +8,21 @@ public struct MacroDocument: Codable, Equatable, Identifiable, Sendable {
     public var name: String
     public var controlScope: MacroControlScope
     public var actions: [MacroAction]
+    public var displayConfiguration: DisplayConfiguration?
 
     public init(
         id: UUID = UUID(),
         name: String,
         controlScope: MacroControlScope = .entireScreen,
-        actions: [MacroAction] = []
+        actions: [MacroAction] = [],
+        displayConfiguration: DisplayConfiguration? = nil
     ) {
         formatVersion = Self.currentFormatVersion
         self.id = id
         self.name = name
         self.controlScope = controlScope
         self.actions = actions
+        self.displayConfiguration = displayConfiguration
     }
 
     public func validate() throws {
@@ -30,7 +33,87 @@ public struct MacroDocument: Codable, Equatable, Identifiable, Sendable {
             throw MacroDocumentError.emptyName
         }
         try controlScope.validate()
+        guard controlScope.kind == .entireScreen else {
+            throw MacroDocumentError.unsupportedControlScope
+        }
         try actions.forEach { try $0.validate() }
+        try displayConfiguration?.validate()
+    }
+
+    public func validateForPlayback(
+        currentDisplayConfiguration: DisplayConfiguration
+    ) throws {
+        try validate()
+        guard containsCoordinateActions else { return }
+        guard let displayConfiguration else {
+            throw MacroDocumentError.missingDisplayConfiguration
+        }
+        guard displayConfiguration.isCompatible(with: currentDisplayConfiguration) else {
+            throw MacroDocumentError.displayConfigurationChanged
+        }
+        for action in actions {
+            try action.validateCoordinates(in: currentDisplayConfiguration)
+        }
+    }
+
+    public var containsCoordinateActions: Bool {
+        actions.contains(where: \.containsCoordinateActions)
+    }
+}
+
+public struct DisplayConfiguration: Codable, Equatable, Sendable {
+    public var displays: [DisplayGeometry]
+
+    public init(displays: [DisplayGeometry]) {
+        self.displays = displays.sorted { $0.id < $1.id }
+    }
+
+    public func validate() throws {
+        guard !displays.isEmpty,
+              Set(displays.map(\.id)).count == displays.count,
+              displays.allSatisfy(\.isValid) else {
+            throw MacroDocumentError.invalidDisplayConfiguration
+        }
+    }
+
+    public func isCompatible(with other: DisplayConfiguration) -> Bool {
+        displays == other.displays
+    }
+
+    public func contains(_ point: ScreenPoint) -> Bool {
+        displays.contains { $0.contains(point) }
+    }
+}
+
+public struct DisplayGeometry: Codable, Equatable, Sendable {
+    public var id: UInt32
+    public var origin: ScreenPoint
+    public var width: Double
+    public var height: Double
+    public var scale: Double
+
+    public init(
+        id: UInt32,
+        origin: ScreenPoint,
+        width: Double,
+        height: Double,
+        scale: Double
+    ) {
+        self.id = id
+        self.origin = origin
+        self.width = width
+        self.height = height
+        self.scale = scale
+    }
+
+    fileprivate var isValid: Bool {
+        origin.isFinite && width.isFinite && height.isFinite && scale.isFinite
+            && width > 0 && height > 0 && scale > 0
+    }
+
+    fileprivate func contains(_ point: ScreenPoint) -> Bool {
+        point.x >= origin.x && point.y >= origin.y
+            && point.x < origin.x + width && point.y < origin.y + height
     }
 }
 
@@ -67,6 +150,7 @@ public struct MacroControlScope: Codable, Equatable, Sendable {
             }
         }
     }
+
 }
 
 public struct ApplicationTarget: Codable, Equatable, Sendable {
@@ -92,6 +176,20 @@ public struct ScreenPoint: Codable, Equatable, Sendable {
     public init(x: Double, y: Double) {
         self.x = x
         self.y = y
+    }
+
+    public var isFinite: Bool {
+        x.isFinite && y.isFinite
+    }
+}
+
+public struct TimedScreenPoint: Codable, Equatable, Sendable {
+    public var point: ScreenPoint
+    public var offsetMilliseconds: UInt64
+
+    public init(point: ScreenPoint, offsetMilliseconds: UInt64) {
+        self.point = point
+        self.offsetMilliseconds = offsetMilliseconds
     }
 }
 
@@ -156,14 +254,18 @@ public struct MacroAction: Codable, Equatable, Identifiable, Sendable {
     public static func keyboard(
         keyCode: UInt16,
         characters: String?,
-        modifierFlags: UInt64
+        modifierFlags: UInt64,
+        eventKind: KeyboardPayload.EventKind = .press,
+        isRepeat: Bool = false
     ) -> Self {
         Self(
             kind: .keyboard,
             keyboard: KeyboardPayload(
                 keyCode: keyCode,
                 characters: characters,
-                modifierFlags: modifierFlags
+                modifierFlags: modifierFlags,
+                eventKind: eventKind,
+                isRepeat: isRepeat
             )
         )
     }
@@ -197,19 +299,44 @@ public struct MacroAction: Codable, Equatable, Identifiable, Sendable {
 
         switch kind {
         case .click, .doubleClick, .rightClick, .mouseMove:
-            guard mouse?.end == nil, targetStrategy != nil else {
+            guard let mouse,
+                  mouse.start.isFinite,
+                  mouse.end == nil,
+                  mouse.path == nil,
+                  mouse.durationMilliseconds == nil,
+                  mouse.buttonNumber == nil,
+                  mouse.scrollDeltaX == nil,
+                  mouse.scrollDeltaY == nil,
+                  targetStrategy == .screenCoordinate else {
                 throw MacroDocumentError.invalidAction(id)
             }
         case .drag:
-            guard mouse?.end != nil, targetStrategy != nil else {
+            guard let mouse,
+                  mouse.start.isFinite,
+                  mouse.end?.isFinite == true,
+                  targetStrategy == .screenCoordinate else {
                 throw MacroDocumentError.invalidAction(id)
             }
+            try mouse.validateDrag(actionID: id)
         case .scroll:
-            guard let mouse, mouse.scrollDeltaX != nil || mouse.scrollDeltaY != nil else {
+            guard let mouse,
+                  mouse.start.isFinite,
+                  mouse.end == nil,
+                  mouse.path == nil,
+                  mouse.durationMilliseconds == nil,
+                  mouse.buttonNumber == nil,
+                  mouse.scrollDeltaX?.isFinite != false,
+                  mouse.scrollDeltaY?.isFinite != false,
+                  mouse.scrollDeltaX.map(Self.isValidScrollDelta) != false,
+                  mouse.scrollDeltaY.map(Self.isValidScrollDelta) != false,
+                  mouse.scrollDeltaX != nil || mouse.scrollDeltaY != nil,
+                  targetStrategy == .screenCoordinate else {
                 throw MacroDocumentError.invalidAction(id)
             }
         case .keyboard:
-            guard keyboard != nil, targetStrategy == nil else {
+            guard let keyboard,
+                  keyboard.isRepeat != true || keyboard.resolvedEventKind == .keyDown,
+                  targetStrategy == nil else {
                 throw MacroDocumentError.invalidAction(id)
             }
         case .wait:
@@ -217,47 +344,123 @@ public struct MacroAction: Codable, Equatable, Identifiable, Sendable {
                 throw MacroDocumentError.invalidAction(id)
             }
         case .capture:
-            guard let capture, !capture.destinationDirectory.isEmpty, targetStrategy == nil else {
+            guard let capture,
+                  !capture.destinationDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !capture.includesCursor,
+                  targetStrategy == nil else {
                 throw MacroDocumentError.invalidAction(id)
             }
             try capture.target.validate()
         case .repeatBlock:
-            guard let repeatBlock, repeatBlock.count > 0, !repeatBlock.actions.isEmpty else {
+            guard let repeatBlock,
+                  repeatBlock.count > 0,
+                  !repeatBlock.actions.isEmpty,
+                  targetStrategy == nil else {
                 throw MacroDocumentError.invalidAction(id)
             }
             try repeatBlock.actions.forEach { try $0.validate() }
         }
+    }
+
+    public var containsCoordinateActions: Bool {
+        if targetStrategy == .screenCoordinate || targetStrategy == .accessibilityElementThenCoordinate {
+            return true
+        }
+        return repeatBlock?.actions.contains(where: \.containsCoordinateActions) == true
+    }
+
+    fileprivate func validateCoordinates(in configuration: DisplayConfiguration) throws {
+        if targetStrategy == .screenCoordinate || targetStrategy == .accessibilityElementThenCoordinate {
+            guard let mouse,
+                  configuration.contains(mouse.start),
+                  mouse.end.map(configuration.contains) != false,
+                  mouse.path?.allSatisfy({ configuration.contains($0.point) }) != false else {
+                throw MacroDocumentError.coordinateOutsideDisplays(id)
+            }
+        }
+        try repeatBlock?.actions.forEach { try $0.validateCoordinates(in: configuration) }
+    }
+
+    private static func isValidScrollDelta(_ value: Double) -> Bool {
+        value >= Double(Int32.min) && value <= Double(Int32.max)
     }
 }
 
 public struct MousePayload: Codable, Equatable, Sendable {
     public var start: ScreenPoint
     public var end: ScreenPoint?
+    public var path: [TimedScreenPoint]?
+    public var durationMilliseconds: UInt64?
+    public var buttonNumber: Int64?
     public var scrollDeltaX: Double?
     public var scrollDeltaY: Double?
 
     public init(
         start: ScreenPoint,
         end: ScreenPoint? = nil,
+        path: [TimedScreenPoint]? = nil,
+        durationMilliseconds: UInt64? = nil,
+        buttonNumber: Int64? = nil,
         scrollDeltaX: Double? = nil,
         scrollDeltaY: Double? = nil
     ) {
         self.start = start
         self.end = end
+        self.path = path
+        self.durationMilliseconds = durationMilliseconds
+        self.buttonNumber = buttonNumber
         self.scrollDeltaX = scrollDeltaX
         self.scrollDeltaY = scrollDeltaY
+    }
+
+    fileprivate func validateDrag(actionID: UUID) throws {
+        guard scrollDeltaX == nil,
+              scrollDeltaY == nil,
+              buttonNumber == nil || buttonNumber == 0 || buttonNumber == 1 else {
+            throw MacroDocumentError.invalidAction(actionID)
+        }
+        guard let path else { return }
+        guard path.count >= 2,
+              path.first?.point == start,
+              path.last?.point == end,
+              path.allSatisfy({ $0.point.isFinite }),
+              zip(path, path.dropFirst()).allSatisfy({ $0.offsetMilliseconds <= $1.offsetMilliseconds }),
+              path.first?.offsetMilliseconds == 0,
+              path.last?.offsetMilliseconds == durationMilliseconds else {
+            throw MacroDocumentError.invalidAction(actionID)
+        }
     }
 }
 
 public struct KeyboardPayload: Codable, Equatable, Sendable {
+    public enum EventKind: String, Codable, Equatable, Sendable {
+        case press
+        case keyDown
+        case keyUp
+    }
+
     public var keyCode: UInt16
     public var characters: String?
     public var modifierFlags: UInt64
+    public var eventKind: EventKind?
+    public var isRepeat: Bool?
 
-    public init(keyCode: UInt16, characters: String?, modifierFlags: UInt64) {
+    public init(
+        keyCode: UInt16,
+        characters: String?,
+        modifierFlags: UInt64,
+        eventKind: EventKind = .press,
+        isRepeat: Bool = false
+    ) {
         self.keyCode = keyCode
         self.characters = characters
         self.modifierFlags = modifierFlags
+        self.eventKind = eventKind
+        self.isRepeat = isRepeat
+    }
+
+    public var resolvedEventKind: EventKind {
+        eventKind ?? .press
     }
 }
 
@@ -344,6 +547,11 @@ public enum MacroDocumentError: Error, Equatable, LocalizedError {
     case invalidControlScope
     case invalidAction(UUID)
     case invalidCaptureTarget
+    case invalidDisplayConfiguration
+    case missingDisplayConfiguration
+    case displayConfigurationChanged
+    case coordinateOutsideDisplays(UUID)
+    case unsupportedControlScope
 
     public var errorDescription: String? {
         switch self {
@@ -357,6 +565,16 @@ public enum MacroDocumentError: Error, Equatable, LocalizedError {
             return "매크로 액션 구성이 올바르지 않습니다: \(id)"
         case .invalidCaptureTarget:
             return "캡처 대상 구성이 올바르지 않습니다."
+        case .invalidDisplayConfiguration:
+            return "디스플레이 구성 정보가 올바르지 않습니다."
+        case .missingDisplayConfiguration:
+            return "좌표 재생에 필요한 디스플레이 기준 정보가 없습니다."
+        case .displayConfigurationChanged:
+            return "디스플레이 해상도·배율·배치가 매크로 작성 당시와 달라 재생할 수 없습니다."
+        case let .coordinateOutsideDisplays(id):
+            return "화면 밖 좌표가 포함된 액션은 재생할 수 없습니다: \(id)"
+        case .unsupportedControlScope:
+            return "현재 버전에서는 전체 화면 제어 매크로만 사용할 수 있습니다."
         }
     }
 }

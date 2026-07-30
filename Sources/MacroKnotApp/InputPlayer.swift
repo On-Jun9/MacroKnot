@@ -4,6 +4,29 @@ import Foundation
 import MacroKnotCore
 
 @MainActor
+protocol GlobalStopMonitoring: AnyObject {
+    var isAwaitingShortcutRelease: Bool { get }
+    func start(onStop: @escaping () -> Void) throws
+    func stop()
+}
+
+protocol InputReleasingActionPerformer: MacroActionPerforming {
+    func releaseAllInputs() async
+}
+
+protocol SystemEventPosting: Sendable {
+    func postMouse(
+        type: CGEventType,
+        point: ScreenPoint,
+        button: CGMouseButton,
+        clickState: Int64?
+    ) throws
+    func postScroll(deltaX: Double, deltaY: Double) throws
+    func postKeyboard(_ keyboard: KeyboardPayload, isDown: Bool) throws
+    var currentMouseLocation: ScreenPoint { get }
+}
+
+@MainActor
 final class InputPlayer: ObservableObject {
     enum State: Equatable {
         case idle
@@ -15,10 +38,41 @@ final class InputPlayer: ObservableObject {
 
     @Published private(set) var state = State.idle
     private var task: Task<Void, Never>?
-    private let globalStopMonitor = GlobalStopMonitor()
+    private var performer: (any InputReleasingActionPerformer)?
+    private let globalStopMonitor: any GlobalStopMonitoring
+    private let performerFactory: () -> any InputReleasingActionPerformer
 
-    func play(actions: [MacroAction]) {
-        guard task == nil, !actions.isEmpty else { return }
+    init(
+        globalStopMonitor: any GlobalStopMonitoring = GlobalStopMonitor(),
+        performerFactory: @escaping () -> any InputReleasingActionPerformer = {
+            SystemActionPerformer()
+        }
+    ) {
+        self.globalStopMonitor = globalStopMonitor
+        self.performerFactory = performerFactory
+    }
+
+    func play(document: MacroDocument) {
+        guard task == nil, !document.actions.isEmpty else { return }
+        do {
+            try document.validateForPlayback(
+                currentDisplayConfiguration: DisplayConfigurationProvider.current()
+            )
+        } catch {
+            state = .failed(error.localizedDescription)
+            RuntimeEventLogger.record(
+                "playback_preflight",
+                result: "FAIL",
+                fields: ["error": error.localizedDescription]
+            )
+            return
+        }
+        let actions = document.actions
+        RuntimeEventLogger.record(
+            "playback_preflight",
+            result: "PASS",
+            fields: ["action_count": String(actions.count)]
+        )
         do {
             try globalStopMonitor.start { [weak self] in
                 self?.stopFromGlobalShortcut()
@@ -38,18 +92,23 @@ final class InputPlayer: ObservableObject {
             result: "PASS",
             fields: ["action_count": String(actions.count)]
         )
-        let engine = MacroExecutionEngine(performer: SystemActionPerformer())
+        let performer = performerFactory()
+        self.performer = performer
+        let engine = MacroExecutionEngine(performer: performer)
         task = Task { [weak self] in
             do {
                 try await engine.run(actions)
+                await performer.releaseAllInputs()
                 guard !Task.isCancelled else {
                     self?.finish(.stopped)
                     return
                 }
                 self?.finish(.completed)
             } catch is CancellationError {
+                await performer.releaseAllInputs()
                 self?.finish(.stopped)
             } catch {
+                await performer.releaseAllInputs()
                 self?.finish(.failed(error.localizedDescription))
             }
         }
@@ -60,19 +119,19 @@ final class InputPlayer: ObservableObject {
         if task != nil {
             state = .stopped
         }
-        task = nil
         globalStopMonitor.stop()
     }
 
     private func finish(_ state: State) {
         self.state = state
         task = nil
+        performer = nil
         RuntimeEventLogger.record(
             "playback_finished",
-            result: "PASS",
-            fields: ["state": state.logValue]
+            result: state.isFailure ? "FAIL" : "PASS",
+            fields: state.logFields
         )
-        if !globalStopMonitor.isAwaitingShortcutRelease {
+        if state != .stopped && !globalStopMonitor.isAwaitingShortcutRelease {
             globalStopMonitor.stop()
         }
     }
@@ -87,7 +146,6 @@ final class InputPlayer: ObservableObject {
         if task != nil {
             state = .stopped
         }
-        task = nil
     }
 }
 
@@ -101,9 +159,30 @@ private extension InputPlayer.State {
         case .failed: return "failed"
         }
     }
+
+    var isFailure: Bool {
+        if case .failed = self { return true }
+        return false
+    }
+
+    var logFields: [String: String] {
+        var fields = ["state": logValue]
+        if case let .failed(message) = self {
+            fields["error"] = message
+        }
+        return fields
+    }
 }
 
-private struct SystemActionPerformer: MacroActionPerforming {
+actor SystemActionPerformer: InputReleasingActionPerformer {
+    private var heldKeyFlags: [UInt16: UInt64] = [:]
+    private var heldMouseButtons: Set<UInt32> = []
+    private let eventPoster: any SystemEventPosting
+
+    init(eventPoster: any SystemEventPosting = CoreGraphicsEventPoster()) {
+        self.eventPoster = eventPoster
+    }
+
     func perform(_ action: MacroAction) async throws {
         try Task.checkCancellation()
         switch action.kind {
@@ -123,7 +202,13 @@ private struct SystemActionPerformer: MacroActionPerforming {
             }
             try await Task.sleep(for: .milliseconds(milliseconds))
         case .capture:
-            throw InputPlayerError.captureNotImplemented
+            guard let capture = action.capture else { throw InputPlayerError.invalidAction }
+            let destination = try await ScreenCaptureService.capture(capture)
+            await RuntimeEventLogger.record(
+                "capture_saved",
+                result: "PASS",
+                fields: ["file": destination.lastPathComponent]
+            )
         case .repeatBlock:
             throw InputPlayerError.invalidAction
         }
@@ -131,103 +216,232 @@ private struct SystemActionPerformer: MacroActionPerforming {
 
     private func postClick(_ action: MacroAction) throws {
         guard let point = action.mouse?.start else { throw InputPlayerError.invalidAction }
-        let position = CGPoint(x: point.x, y: point.y)
         let button: CGMouseButton = action.kind == .rightClick ? .right : .left
         let downType: CGEventType = action.kind == .rightClick ? .rightMouseDown : .leftMouseDown
         let upType: CGEventType = action.kind == .rightClick ? .rightMouseUp : .leftMouseUp
         let count = action.kind == .doubleClick ? 2 : 1
 
         for clickIndex in 1...count {
-            guard
-                let down = CGEvent(mouseEventSource: nil, mouseType: downType, mouseCursorPosition: position, mouseButton: button),
-                let up = CGEvent(mouseEventSource: nil, mouseType: upType, mouseCursorPosition: position, mouseButton: button)
-            else { throw InputPlayerError.eventCreationFailed }
-            down.setIntegerValueField(.mouseEventClickState, value: Int64(clickIndex))
-            up.setIntegerValueField(.mouseEventClickState, value: Int64(clickIndex))
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
+            try eventPoster.postMouse(
+                type: downType,
+                point: point,
+                button: button,
+                clickState: Int64(clickIndex)
+            )
+            try eventPoster.postMouse(
+                type: upType,
+                point: point,
+                button: button,
+                clickState: Int64(clickIndex)
+            )
         }
     }
 
     private func postMouseMove(_ action: MacroAction) throws {
-        guard let point = action.mouse?.start,
-              let event = CGEvent(
-                mouseEventSource: nil,
-                mouseType: .mouseMoved,
-                mouseCursorPosition: CGPoint(x: point.x, y: point.y),
-                mouseButton: .left
-              ) else { throw InputPlayerError.invalidAction }
-        event.post(tap: .cghidEventTap)
+        guard let point = action.mouse?.start else { throw InputPlayerError.invalidAction }
+        try eventPoster.postMouse(
+            type: .mouseMoved,
+            point: point,
+            button: .left,
+            clickState: nil
+        )
     }
 
     private func postDrag(_ action: MacroAction) async throws {
         guard let start = action.mouse?.start, let end = action.mouse?.end else {
             throw InputPlayerError.invalidAction
         }
-        let startPoint = CGPoint(x: start.x, y: start.y)
-        let endPoint = CGPoint(x: end.x, y: end.y)
-        guard
-            let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: startPoint, mouseButton: .left),
-            let dragged = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged, mouseCursorPosition: endPoint, mouseButton: .left),
-            let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: endPoint, mouseButton: .left)
-        else { throw InputPlayerError.eventCreationFailed }
-        var didReleaseButton = false
-        defer {
-            if !didReleaseButton {
-                up.post(tap: .cghidEventTap)
+        let button: CGMouseButton = action.mouse?.buttonNumber == 1 ? .right : .left
+        let downType: CGEventType = button == .right ? .rightMouseDown : .leftMouseDown
+        let draggedType: CGEventType = button == .right ? .rightMouseDragged : .leftMouseDragged
+        heldMouseButtons.insert(button.rawValue)
+        try eventPoster.postMouse(
+            type: downType,
+            point: start,
+            button: button,
+            clickState: nil
+        )
+
+        var currentPoint = start
+        do {
+            let path = action.mouse?.path ?? [
+                TimedScreenPoint(point: start, offsetMilliseconds: 0),
+                TimedScreenPoint(
+                    point: end,
+                    offsetMilliseconds: action.mouse?.durationMilliseconds ?? 30
+                ),
+            ]
+            var previousOffset = path.first?.offsetMilliseconds ?? 0
+            for sample in path.dropFirst() {
+                try Task.checkCancellation()
+                let delay = sample.offsetMilliseconds - previousOffset
+                if delay > 0 {
+                    try await Task.sleep(for: .milliseconds(delay))
+                }
+                try eventPoster.postMouse(
+                    type: draggedType,
+                    point: sample.point,
+                    button: button,
+                    clickState: nil
+                )
+                currentPoint = sample.point
+                previousOffset = sample.offsetMilliseconds
             }
+            try postMouseUp(button: button, point: end)
+        } catch {
+            try? postMouseUp(button: button, point: currentPoint)
+            throw error
         }
-        down.post(tap: .cghidEventTap)
-        try await Task.sleep(for: .milliseconds(30))
-        dragged.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
-        didReleaseButton = true
     }
 
     private func postScroll(_ action: MacroAction) throws {
-        guard let mouse = action.mouse,
-              let event = CGEvent(
-                scrollWheelEvent2Source: nil,
-                units: .pixel,
-                wheelCount: 2,
-                wheel1: Int32(mouse.scrollDeltaY ?? 0),
-                wheel2: Int32(mouse.scrollDeltaX ?? 0),
-                wheel3: 0
-              ) else { throw InputPlayerError.invalidAction }
-        event.post(tap: .cghidEventTap)
+        guard let mouse = action.mouse else { throw InputPlayerError.invalidAction }
+        let deltaX = mouse.scrollDeltaX ?? 0
+        let deltaY = mouse.scrollDeltaY ?? 0
+        guard deltaX.isFinite,
+              deltaY.isFinite,
+              deltaX >= Double(Int32.min),
+              deltaX <= Double(Int32.max),
+              deltaY >= Double(Int32.min),
+              deltaY <= Double(Int32.max) else {
+            throw InputPlayerError.invalidAction
+        }
+        try postMouseMove(MacroAction(
+            kind: .mouseMove,
+            targetStrategy: .screenCoordinate,
+            mouse: MousePayload(start: mouse.start)
+        ))
+        try eventPoster.postScroll(
+            deltaX: deltaX,
+            deltaY: deltaY
+        )
     }
 
     private func postKeyboard(_ action: MacroAction) throws {
-        guard let keyboard = action.keyboard,
-              let down = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyboard.keyCode), keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyboard.keyCode), keyDown: false)
-        else { throw InputPlayerError.invalidAction }
-        let flags = CGEventFlags(rawValue: keyboard.modifierFlags)
-        down.flags = flags
-        up.flags = flags
+        guard let keyboard = action.keyboard else { throw InputPlayerError.invalidAction }
+        switch keyboard.resolvedEventKind {
+        case .press:
+            try postKey(keyboard, isDown: true)
+            try postKey(keyboard, isDown: false)
+        case .keyDown:
+            try postKey(keyboard, isDown: true)
+            heldKeyFlags[keyboard.keyCode] = keyboard.modifierFlags
+        case .keyUp:
+            try postKey(keyboard, isDown: false)
+            heldKeyFlags.removeValue(forKey: keyboard.keyCode)
+        }
+    }
+
+    private func postKey(_ keyboard: KeyboardPayload, isDown: Bool) throws {
+        try eventPoster.postKeyboard(keyboard, isDown: isDown)
+    }
+
+    private func postMouseUp(button: CGMouseButton, point: ScreenPoint) throws {
+        try eventPoster.postMouse(
+            type: button == .right ? .rightMouseUp : .leftMouseUp,
+            point: point,
+            button: button,
+            clickState: nil
+        )
+        heldMouseButtons.remove(button.rawValue)
+    }
+
+    func releaseAllInputs() {
+        for keyCode in heldKeyFlags.keys {
+            let keyboard = KeyboardPayload(
+                keyCode: keyCode,
+                characters: nil,
+                modifierFlags: 0,
+                eventKind: .keyUp
+            )
+            try? postKey(keyboard, isDown: false)
+        }
+        heldKeyFlags.removeAll()
+
+        let current = eventPoster.currentMouseLocation
+        for rawButton in heldMouseButtons {
+            guard let button = CGMouseButton(rawValue: rawButton) else { continue }
+            try? eventPoster.postMouse(
+                type: button == .right ? .rightMouseUp : .leftMouseUp,
+                point: current,
+                button: button,
+                clickState: nil
+            )
+        }
+        heldMouseButtons.removeAll()
+    }
+}
+
+struct CoreGraphicsEventPoster: SystemEventPosting {
+    var currentMouseLocation: ScreenPoint {
+        let point = CGEvent(source: nil)?.location ?? .zero
+        return ScreenPoint(x: point.x, y: point.y)
+    }
+
+    func postMouse(
+        type: CGEventType,
+        point: ScreenPoint,
+        button: CGMouseButton,
+        clickState: Int64?
+    ) throws {
+        guard let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: type,
+            mouseCursorPosition: CGPoint(x: point.x, y: point.y),
+            mouseButton: button
+        ) else { throw InputPlayerError.eventCreationFailed }
+        if let clickState {
+            event.setIntegerValueField(.mouseEventClickState, value: clickState)
+        }
+        event.post(tap: .cghidEventTap)
+    }
+
+    func postScroll(deltaX: Double, deltaY: Double) throws {
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .pixel,
+            wheelCount: 2,
+            wheel1: Int32(deltaY.rounded()),
+            wheel2: Int32(deltaX.rounded()),
+            wheel3: 0
+        ) else { throw InputPlayerError.eventCreationFailed }
+        event.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: deltaY)
+        event.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: deltaX)
+        event.post(tap: .cghidEventTap)
+    }
+
+    func postKeyboard(_ keyboard: KeyboardPayload, isDown: Bool) throws {
+        guard let event = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: CGKeyCode(keyboard.keyCode),
+            keyDown: isDown
+        ) else { throw InputPlayerError.eventCreationFailed }
+        event.flags = CGEventFlags(rawValue: keyboard.modifierFlags)
+        if keyboard.isRepeat == true {
+            event.setIntegerValueField(.keyboardEventAutorepeat, value: 1)
+        }
         if let characters = keyboard.characters {
             let utf16 = Array(characters.utf16)
             utf16.withUnsafeBufferPointer { buffer in
                 guard let address = buffer.baseAddress else { return }
-                down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: address)
-                up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: address)
+                event.keyboardSetUnicodeString(
+                    stringLength: buffer.count,
+                    unicodeString: address
+                )
             }
         }
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        event.post(tap: .cghidEventTap)
     }
 }
 
 private enum InputPlayerError: LocalizedError {
     case invalidAction
     case eventCreationFailed
-    case captureNotImplemented
 
     var errorDescription: String? {
         switch self {
         case .invalidAction: return "재생할 액션 구성이 올바르지 않습니다."
         case .eventCreationFailed: return "macOS 입력 이벤트를 만들지 못했습니다."
-        case .captureNotImplemented: return "캡처 액션 재생은 아직 구현되지 않았습니다."
         }
     }
 }

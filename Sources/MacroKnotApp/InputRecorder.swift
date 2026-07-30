@@ -18,39 +18,74 @@ final class InputRecorder: ObservableObject {
         }
     }
 
-    func start(mode: InputRecordingMode) {
+    func start(
+        mode: InputRecordingMode,
+        excludesEventsTargetingMacroKnot: Bool,
+        suppressesInitialShortcutModifierReleases: Bool = false
+    ) {
         guard !isRecording else { return }
         actions = []
         errorMessage = nil
         lastEvent = "입력을 기다리고 있습니다."
-        reducer = InputActionReducer(mode: mode)
+        reducer = InputActionReducer(
+            mode: mode,
+            recordingStartTimestampNanoseconds: Self.currentInputTimestampNanoseconds()
+        )
+        driver.excludesEventsTargetingRecorder = excludesEventsTargetingMacroKnot
+        driver.suppressesShortcutModifierReleases = suppressesInitialShortcutModifierReleases
 
         do {
             try driver.start()
             isRecording = true
+            RuntimeEventLogger.record(
+                "recording_started",
+                result: "PASS",
+                fields: ["mode": mode.rawValue]
+            )
         } catch {
             errorMessage = error.localizedDescription
+            RuntimeEventLogger.record(
+                "recording_started",
+                result: "FAIL",
+                fields: ["error": error.localizedDescription]
+            )
         }
     }
 
-    func stop() {
+    func stop(discardingTrailingShortcutModifiers: Bool = false) {
         driver.stop()
+        if discardingTrailingShortcutModifiers {
+            while actions.last?.isShortcutModifierKeyDown == true {
+                actions.removeLast()
+            }
+        }
         isRecording = false
+        RuntimeEventLogger.record(
+            "recording_stopped",
+            result: "PASS",
+            fields: ["action_count": String(actions.count)]
+        )
     }
 
     private func consume(_ event: RawInputEvent) {
-        let reduced = reducer.consume(event)
+        let reduced = reducer.consume(event, appendingTo: &actions)
         guard !reduced.isEmpty else { return }
-        actions.append(contentsOf: reduced)
         lastEvent = "\(event.kind.rawValue) → \(reduced.map(\.kind.rawValue).joined(separator: ", "))"
+    }
+
+    private static func currentInputTimestampNanoseconds() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds
     }
 }
 
 private final class EventTapDriver {
     var onEvent: ((RawInputEvent) -> Void)?
+    var excludesEventsTargetingRecorder = true
 
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
+    private var windowOwnerProcessIDs: [CGWindowID: Int64] = [:]
+    var suppressesShortcutModifierReleases = false
 
     func start() throws {
         guard tap == nil else { return }
@@ -60,7 +95,7 @@ private final class EventTapDriver {
         let pointer = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
+            place: .tailAppendEventTap,
             options: .listenOnly,
             eventsOfInterest: mask,
             callback: inputEventTapCallback,
@@ -85,6 +120,8 @@ private final class EventTapDriver {
         }
         source = nil
         tap = nil
+        windowOwnerProcessIDs.removeAll()
+        suppressesShortcutModifierReleases = false
     }
 
     fileprivate func receive(type: CGEventType, event: CGEvent) {
@@ -94,9 +131,26 @@ private final class EventTapDriver {
             }
             return
         }
-        let sourcePID = event.getIntegerValueField(.eventSourceUnixProcessID)
-        guard sourcePID != Int64(ProcessInfo.processInfo.processIdentifier) else { return }
         guard let kind = Self.kind(for: type) else { return }
+        if suppressesShortcutModifierReleases, kind == .flagsChanged {
+            let flags = event.flags
+            if !flags.contains(.maskControl),
+               !flags.contains(.maskAlternate),
+               !flags.contains(.maskCommand),
+               !flags.contains(.maskShift) {
+                suppressesShortcutModifierReleases = false
+            }
+            return
+        }
+        let sourcePID = event.getIntegerValueField(.eventSourceUnixProcessID)
+        let destinationPID = destinationProcessID(for: kind, event: event)
+        let recorderPID = Int64(ProcessInfo.processInfo.processIdentifier)
+        guard InputEventProcessFilter.shouldRecord(
+            sourceProcessID: sourcePID,
+            destinationProcessID: destinationPID,
+            recorderProcessID: recorderPID,
+            excludesEventsTargetingRecorder: excludesEventsTargetingRecorder
+        ) else { return }
 
         let location = event.location
         onEvent?(RawInputEvent(
@@ -107,12 +161,43 @@ private final class EventTapDriver {
             clickCount: event.getIntegerValueField(.mouseEventClickState),
             scrollDeltaX: event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2),
             scrollDeltaY: event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1),
-            keyCode: type == .keyDown || type == .keyUp
+            keyCode: type == .keyDown || type == .keyUp || type == .flagsChanged
                 ? UInt16(event.getIntegerValueField(.keyboardEventKeycode))
                 : nil,
             characters: Self.characters(from: event),
-            modifierFlags: event.flags.rawValue
+            modifierFlags: event.flags.rawValue,
+            isKeyboardRepeat: event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         ))
+    }
+
+    private func destinationProcessID(for kind: RawInputEventKind, event: CGEvent) -> Int64? {
+        guard kind.isPointerEvent else {
+            return event.getIntegerValueField(.eventTargetUnixProcessID)
+        }
+
+        let handlingWindowID = event.getIntegerValueField(
+            .mouseEventWindowUnderMousePointerThatCanHandleThisEvent
+        )
+        let windowUnderPointerID = event.getIntegerValueField(.mouseEventWindowUnderMousePointer)
+        let rawWindowID = handlingWindowID > 0 ? handlingWindowID : windowUnderPointerID
+        guard rawWindowID > 0, rawWindowID <= Int64(UInt32.max) else {
+            return nil
+        }
+
+        let windowID = CGWindowID(rawWindowID)
+        if let cachedProcessID = windowOwnerProcessIDs[windowID] {
+            return cachedProcessID
+        }
+        guard
+            let windowInfo = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID)
+                as? [[CFString: Any]],
+            let ownerProcessID = windowInfo.first?[kCGWindowOwnerPID] as? NSNumber
+        else {
+            return nil
+        }
+        let processID = ownerProcessID.int64Value
+        windowOwnerProcessIDs[windowID] = processID
+        return processID
     }
 
     private static let eventTypes: [CGEventType] = [
@@ -154,6 +239,30 @@ private final class EventTapDriver {
         }
         guard actualLength > 0 else { return nil }
         return String(utf16CodeUnits: buffer, count: actualLength)
+    }
+}
+
+private extension RawInputEventKind {
+    var isPointerEvent: Bool {
+        switch self {
+        case .leftMouseDown, .leftMouseUp,
+             .rightMouseDown, .rightMouseUp,
+             .mouseMoved, .leftMouseDragged, .rightMouseDragged,
+             .scrollWheel:
+            return true
+        case .keyDown, .keyUp, .flagsChanged:
+            return false
+        }
+    }
+}
+
+private extension MacroAction {
+    var isShortcutModifierKeyDown: Bool {
+        guard kind == .keyboard,
+              keyboard?.resolvedEventKind == .keyDown,
+              let keyCode = keyboard?.keyCode
+        else { return false }
+        return [54, 55, 56, 57, 58, 59, 60, 61, 62].contains(keyCode)
     }
 }
 
