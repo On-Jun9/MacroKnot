@@ -8,8 +8,12 @@ final class DocumentController: ObservableObject {
     @Published private(set) var currentURL: URL?
     @Published private(set) var errorMessage: String?
 
-    init() {
-        document.displayConfiguration = DisplayConfigurationProvider.current()
+    init(initialDocument: MacroDocument? = nil) {
+        if let initialDocument {
+            document = initialDocument
+        } else {
+            document.displayConfiguration = DisplayConfigurationProvider.current()
+        }
     }
 
     var windowTitle: String {
