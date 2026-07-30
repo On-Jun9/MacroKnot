@@ -9,5 +9,8 @@ struct MacroKnotApp: App {
             ContentView(permissions: permissions)
                 .frame(minWidth: 820, minHeight: 620)
         }
+        Settings {
+            SettingsView(permissions: permissions)
+        }
     }
 }

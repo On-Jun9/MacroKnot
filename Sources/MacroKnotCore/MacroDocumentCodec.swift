@@ -9,8 +9,16 @@ public enum MacroDocumentCodec {
     }
 
     public static func decode(_ data: Data) throws -> MacroDocument {
-        let document = try JSONDecoder().decode(MacroDocument.self, from: data)
+        let document = try decodeForEditing(data)
         try document.validate()
+        return document
+    }
+
+    public static func decodeForEditing(_ data: Data) throws -> MacroDocument {
+        let document = try JSONDecoder().decode(MacroDocument.self, from: data)
+        guard document.formatVersion == MacroDocument.currentFormatVersion else {
+            throw MacroDocumentError.unsupportedFormatVersion(document.formatVersion)
+        }
         return document
     }
 
@@ -21,5 +29,9 @@ public enum MacroDocumentCodec {
 
     public static func load(from url: URL) throws -> MacroDocument {
         try decode(Data(contentsOf: url))
+    }
+
+    public static func loadForEditing(from url: URL) throws -> MacroDocument {
+        try decodeForEditing(Data(contentsOf: url))
     }
 }
