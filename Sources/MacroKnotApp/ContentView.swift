@@ -10,6 +10,16 @@ enum WorkspacePreviewState {
     case failed(String)
 }
 
+enum MacroEditorChangeDetection {
+    static func hasUnsavedChanges(
+        initial: MacroDocument?,
+        current: MacroDocument
+    ) -> Bool {
+        guard let initial else { return true }
+        return current != initial
+    }
+}
+
 struct MacroEditorConfiguration {
     let startRecording: Bool
     let isPlaybackRunning: () -> Bool
@@ -18,6 +28,7 @@ struct MacroEditorConfiguration {
     let onDraftChanged: (MacroDocument) -> Void
     let onSave: (MacroDocument) throws -> Void
     let onCancel: () -> Void
+    let onClose: () -> Void
 }
 
 extension Notification.Name {
@@ -34,13 +45,15 @@ struct ContentView: View {
     @StateObject private var player = InputPlayer()
     @StateObject private var globalCommandMonitor = GlobalCommandMonitor()
     @State private var actionEditorDraft: ActionEditorDraft?
-    @State private var selectedActionID: UUID?
+    @State private var selectedActionIDs: Set<UUID>
     @State private var isRepeatRangePresented = false
     @State private var isDeleteAllConfirmationPresented = false
     @State private var isCancelConfirmationPresented = false
     @State private var editorErrorMessage: String?
     @State private var autosaveTask: Task<Void, Never>?
     @State private var isSidebarPresented = true
+    @FocusState private var isMacroNameFocused: Bool
+    @State private var initialDocumentSnapshot: MacroDocument?
     @AppStorage(AppPreferenceKeys.excludesEventsTargetingMacroKnot)
     private var excludesEventsTargetingMacroKnot = true
     @AppStorage(AppPreferenceKeys.recordingMode)
@@ -56,6 +69,7 @@ struct ContentView: View {
     init(
         permissions: PermissionState,
         initialDocument: MacroDocument? = nil,
+        initialSelectedActionIDs: Set<UUID> = [],
         previewState: WorkspacePreviewState = .live,
         editorConfiguration: MacroEditorConfiguration? = nil
     ) {
@@ -65,6 +79,8 @@ struct ContentView: View {
         _documentController = StateObject(
             wrappedValue: DocumentController(initialDocument: initialDocument)
         )
+        _selectedActionIDs = State(initialValue: initialSelectedActionIDs)
+        _initialDocumentSnapshot = State(initialValue: initialDocument)
     }
 
     var body: some View {
@@ -72,16 +88,23 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 Divider()
                 feedbackBanner
-                HSplitView {
-                    if isSidebarPresented {
-                        controlSidebar
-                            .frame(minWidth: 270, idealWidth: 300, maxWidth: 340)
-                    }
+                if editorConfiguration != nil {
                     workspace
                         .frame(minWidth: 560)
+                } else {
+                    HSplitView {
+                        if isSidebarPresented {
+                            controlSidebar
+                                .frame(minWidth: 270, idealWidth: 300, maxWidth: 340)
+                        }
+                        workspace
+                            .frame(minWidth: 560)
+                    }
                 }
             }
-            .navigationTitle(documentController.windowTitle)
+            .navigationTitle(
+                editorConfiguration == nil ? documentController.windowTitle : "매크로 편집"
+            )
             .toolbar { workspaceToolbar }
             .toolbarBackground(.visible, for: .windowToolbar)
         }
@@ -93,7 +116,7 @@ struct ContentView: View {
                 } else {
                     documentController.addAction(action)
                 }
-                selectedActionID = action.id
+                selectedActionIDs = [action.id]
             }
         }
         .sheet(isPresented: $isRepeatRangePresented) {
@@ -103,13 +126,15 @@ struct ContentView: View {
                     through: end,
                     count: count
                 )
-                selectedActionID = documentController.document.actions[safe: start]?.id
+                selectedActionIDs = Set(
+                    documentController.document.actions[start...end].map(\.id)
+                )
             }
         }
         .alert("모든 액션을 삭제할까요?", isPresented: $isDeleteAllConfirmationPresented) {
             Button("전체 삭제", role: .destructive) {
                 documentController.removeAllActions()
-                selectedActionID = nil
+                selectedActionIDs.removeAll()
             }
             Button("취소", role: .cancel) {}
         } message: {
@@ -152,8 +177,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: documentController.document.actions.map(\.id)) { _, actionIDs in
-            guard let selectedActionID, !actionIDs.contains(selectedActionID) else { return }
-            self.selectedActionID = nil
+            selectedActionIDs.formIntersection(actionIDs)
         }
         .onChange(of: documentController.document) { _, document in
             scheduleDraftAutosave(document)
@@ -170,18 +194,20 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var workspaceToolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .navigation) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    isSidebarPresented.toggle()
+        if editorConfiguration == nil {
+            ToolbarItemGroup(placement: .navigation) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        isSidebarPresented.toggle()
+                    }
+                } label: {
+                    Label(
+                        isSidebarPresented ? "사이드바 가리기" : "사이드바 보기",
+                        systemImage: "sidebar.leading"
+                    )
                 }
-            } label: {
-                Label(
-                    isSidebarPresented ? "사이드바 가리기" : "사이드바 보기",
-                    systemImage: "sidebar.leading"
-                )
+                .help(isSidebarPresented ? "사이드바 가리기" : "사이드바 보기")
             }
-            .help(isSidebarPresented ? "사이드바 가리기" : "사이드바 보기")
         }
 
         if editorConfiguration == nil {
@@ -224,7 +250,11 @@ struct ContentView: View {
             workspaceHeader
             Divider()
             activityBanner
-            actionWorkspace
+            if editorConfiguration != nil {
+                editorActionWorkspace
+            } else {
+                actionWorkspace
+            }
             if editorConfiguration != nil {
                 Divider()
                 editorFooter
@@ -240,6 +270,7 @@ struct ContentView: View {
                     .textFieldStyle(.plain)
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(.primary)
+                    .focused($isMacroNameFocused)
                     .accessibilityLabel("매크로 이름")
 
                 HStack(spacing: 8) {
@@ -327,13 +358,39 @@ struct ContentView: View {
         VStack(spacing: 0) {
             actionToolbar
             Divider()
-            if displayedActions.isEmpty {
-                emptyActionView
-            } else {
-                actionList
-            }
+            actionContent
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var editorActionWorkspace: some View {
+        VStack(spacing: 0) {
+            actionToolbar
+            Divider()
+            recordingSettingsBar
+            Divider()
+            actionContent
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            Color(nsColor: .controlBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 12)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.primary.opacity(0.08))
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+    }
+
+    @ViewBuilder
+    private var actionContent: some View {
+        if displayedActions.isEmpty {
+            emptyActionView
+        } else {
+            actionList
+        }
     }
 
     private var actionToolbar: some View {
@@ -357,13 +414,15 @@ struct ContentView: View {
                 Button(action: { toggleRecording() }) {
                     Label(
                         isRecordingPresented ? "녹화 중지" : "녹화 시작",
-                        systemImage: isRecordingPresented ? "stop.fill" : "record.circle"
+                        systemImage: isRecordingPresented ? "stop.fill" : "record.circle.fill"
                     )
                 }
+                .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .fixedSize()
                 .disabled(!isRecordingPresented && editorConfiguration?.isPlaybackRunning() == true)
                 .help(isRecordingPresented ? "현재 녹화를 마칩니다" : "사용자 입력 녹화를 시작합니다")
+
             }
 
             addActionMenu
@@ -376,29 +435,11 @@ struct ContentView: View {
             .disabled(selectedAction == nil || isRecordingPresented)
             .help("선택한 액션 편집")
 
-            Button {
-                moveSelectedAction(offset: -1)
-            } label: {
-                Label("위로 이동", systemImage: "chevron.up")
-            }
-            .labelStyle(.iconOnly)
-            .disabled(!canMoveSelectedAction(offset: -1) || isRecordingPresented)
-            .help("선택한 액션을 위로 이동")
-
-            Button {
-                moveSelectedAction(offset: 1)
-            } label: {
-                Label("아래로 이동", systemImage: "chevron.down")
-            }
-            .labelStyle(.iconOnly)
-            .disabled(!canMoveSelectedAction(offset: 1) || isRecordingPresented)
-            .help("선택한 액션을 아래로 이동")
-
             Menu {
-                Button("선택한 액션 삭제", systemImage: "trash", role: .destructive) {
-                    removeSelectedAction()
+                Button(deleteSelectionTitle, systemImage: "trash", role: .destructive) {
+                    removeSelectedActions()
                 }
-                .disabled(selectedAction == nil || isRecordingPresented)
+                .disabled(selectedActionIDs.isEmpty || isRecordingPresented)
 
                 Button("범위를 반복으로 묶기…", systemImage: "repeat") {
                     isRepeatRangePresented = true
@@ -415,10 +456,47 @@ struct ContentView: View {
                 Label("추가 작업", systemImage: "ellipsis.circle")
             }
             .labelStyle(.iconOnly)
+            .menuIndicator(.hidden)
             .help("액션 추가 작업")
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
+    }
+
+    private var recordingSettingsBar: some View {
+        HStack(spacing: 12) {
+            Text("마우스 기록")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 3) {
+                CompactChoiceButton(
+                    title: "주요 동작만",
+                    isSelected: recordingMode == .meaningfulActionsOnly
+                ) {
+                    recordingModeRawValue = InputRecordingMode.meaningfulActionsOnly.rawValue
+                }
+                CompactChoiceButton(
+                    title: "모든 움직임",
+                    isSelected: recordingMode == .allMouseMovement
+                ) {
+                    recordingModeRawValue = InputRecordingMode.allMouseMovement.rawValue
+                }
+            }
+            .padding(3)
+            .frame(width: 230)
+            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+
+            Spacer()
+
+            Toggle("MacroKnot 창 입력 제외", isOn: $excludesEventsTargetingMacroKnot)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+        .disabled(isRecordingPresented)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 9)
+        .background(Color.primary.opacity(0.025))
     }
 
     private var editorFooter: some View {
@@ -428,7 +506,7 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             Spacer()
             Button("취소") {
-                isCancelConfirmationPresented = true
+                cancelEditor()
             }
             Button(action: saveEditor) {
                 Label("보관함에 저장", systemImage: "checkmark")
@@ -496,7 +574,7 @@ struct ContentView: View {
 
             HStack(spacing: 10) {
                 Button(action: { toggleRecording() }) {
-                    Label("녹화 시작", systemImage: "record.circle")
+                    Label("녹화 시작", systemImage: "record.circle.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
@@ -515,7 +593,7 @@ struct ContentView: View {
     }
 
     private var actionList: some View {
-        List(selection: $selectedActionID) {
+        List(selection: $selectedActionIDs) {
             ForEach(displayedActions, id: \.action.id) { item in
                 if item.isLive {
                     ActionRow(item: item)
@@ -524,36 +602,35 @@ struct ContentView: View {
                         .tag(item.action.id)
                         .contextMenu {
                             Button("편집", systemImage: "slider.horizontal.3") {
+                                selectedActionIDs = [item.action.id]
                                 actionEditorDraft = ActionEditorDraft(action: item.action)
                             }
                             .disabled(isRecordingPresented)
-                            Button("위로 이동", systemImage: "chevron.up") {
-                                documentController.moveAction(id: item.action.id, offset: -1)
-                            }
-                            .disabled(item.position == 0 || isRecordingPresented)
-                            Button("아래로 이동", systemImage: "chevron.down") {
-                                documentController.moveAction(id: item.action.id, offset: 1)
-                            }
-                            .disabled(
-                                item.position == documentController.document.actions.count - 1
-                                    || isRecordingPresented
-                            )
                             Divider()
-                            Button("삭제", systemImage: "trash", role: .destructive) {
-                                documentController.removeAction(id: item.action.id)
-                                if selectedActionID == item.action.id {
-                                    selectedActionID = nil
-                                }
+                            Button(contextDeleteTitle(for: item.action.id), systemImage: "trash", role: .destructive) {
+                                let ids = selectedActionIDs.contains(item.action.id)
+                                    ? selectedActionIDs
+                                    : [item.action.id]
+                                documentController.removeActions(ids: ids)
+                                selectedActionIDs.subtract(ids)
                             }
                             .disabled(isRecordingPresented)
                         }
                 }
             }
         }
-        .listStyle(.inset(alternatesRowBackgrounds: true))
+        .listStyle(.inset)
         .scrollContentBackground(.hidden)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(
+            editorConfiguration == nil
+                ? Color(nsColor: .textBackgroundColor)
+                : Color(nsColor: .controlBackgroundColor)
+        )
         .accessibilityLabel("매크로 액션 목록")
+        .onDeleteCommand {
+            guard !selectedActionIDs.isEmpty, !isRecordingPresented else { return }
+            removeSelectedActions()
+        }
     }
 
     private var controlSidebar: some View {
@@ -753,12 +830,16 @@ struct ContentView: View {
     }
 
     private var selectedAction: MacroAction? {
-        guard let selectedActionID else { return nil }
+        guard selectedActionIDs.count == 1, let selectedActionID = selectedActionIDs.first else {
+            return nil
+        }
         return documentController.document.actions.first { $0.id == selectedActionID }
     }
 
     private var selectedActionIndex: Int? {
-        guard let selectedActionID else { return nil }
+        guard let selectedActionID = selectedActionIDs.first, selectedActionIDs.count == 1 else {
+            return nil
+        }
         return documentController.document.actions.firstIndex { $0.id == selectedActionID }
     }
 
@@ -793,10 +874,25 @@ struct ContentView: View {
             }
             return "새 액션이 목록에 실시간으로 추가됩니다"
         }
+        if selectedActionIDs.count > 1 {
+            return "\(selectedActionIDs.count)개 액션 선택됨 · Command/Shift로 선택 조정"
+        }
         guard let selectedActionIndex, let selectedAction else {
             return displayedActions.isEmpty ? "녹화하거나 직접 추가할 수 있습니다" : "액션을 선택하면 편집할 수 있습니다"
         }
         return "\(selectedActionIndex + 1)번 · \(selectedAction.displayName) 선택됨"
+    }
+
+    private var deleteSelectionTitle: String {
+        selectedActionIDs.count > 1
+            ? "선택한 액션 \(selectedActionIDs.count)개 삭제"
+            : "선택한 액션 삭제"
+    }
+
+    private func contextDeleteTitle(for id: UUID) -> String {
+        selectedActionIDs.contains(id) && selectedActionIDs.count > 1
+            ? "선택한 액션 \(selectedActionIDs.count)개 삭제"
+            : "삭제"
     }
 
     private var documentLocationText: String {
@@ -810,14 +906,18 @@ struct ContentView: View {
                 newMacro: nil,
                 importMacro: nil,
                 saveMacro: saveEditor,
-                exportMacro: nil
+                exportMacro: nil,
+                closeWindow: editorConfiguration?.onClose
             )
         }
         return MacroCommands(
             newMacro: newDocument,
             importMacro: openDocument,
             saveMacro: documentController.saveDocument,
-            exportMacro: documentController.saveDocumentAs
+            exportMacro: documentController.saveDocumentAs,
+            closeWindow: {
+                NSApplication.shared.keyWindow?.performClose(nil)
+            }
         )
     }
 
@@ -863,7 +963,9 @@ struct ContentView: View {
                 toggleRecording(triggeredByGlobalShortcut: true)
             }
         }
-        DispatchQueue.main.async {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            isMacroNameFocused = false
             NSApplication.shared.keyWindow?.makeFirstResponder(nil)
         }
     }
@@ -895,12 +997,12 @@ struct ContentView: View {
 
     private func newDocument() {
         documentController.newDocument()
-        selectedActionID = nil
+        selectedActionIDs.removeAll()
     }
 
     private func openDocument() {
         documentController.openDocument()
-        selectedActionID = nil
+        selectedActionIDs.removeAll()
     }
 
     private func editSelectedAction() {
@@ -908,20 +1010,25 @@ struct ContentView: View {
         actionEditorDraft = ActionEditorDraft(action: selectedAction)
     }
 
-    private func moveSelectedAction(offset: Int) {
-        guard let selectedActionID else { return }
-        documentController.moveAction(id: selectedActionID, offset: offset)
+    private func removeSelectedActions() {
+        guard !selectedActionIDs.isEmpty else { return }
+        documentController.removeActions(ids: selectedActionIDs)
+        selectedActionIDs.removeAll()
     }
 
-    private func canMoveSelectedAction(offset: Int) -> Bool {
-        guard let selectedActionIndex else { return false }
-        return documentController.document.actions.indices.contains(selectedActionIndex + offset)
+    private var hasUnsavedChanges: Bool {
+        MacroEditorChangeDetection.hasUnsavedChanges(
+            initial: initialDocumentSnapshot,
+            current: documentController.document
+        )
     }
 
-    private func removeSelectedAction() {
-        guard let selectedActionID else { return }
-        documentController.removeAction(id: selectedActionID)
-        self.selectedActionID = nil
+    private func cancelEditor() {
+        if hasUnsavedChanges {
+            isCancelConfirmationPresented = true
+        } else {
+            editorConfiguration?.onCancel()
+        }
     }
 
     private func toggleRecording(triggeredByGlobalShortcut: Bool = false) {
@@ -929,7 +1036,7 @@ struct ContentView: View {
             recorder.stop(discardingTrailingShortcutModifiers: triggeredByGlobalShortcut)
             let recordedActions = recorder.actions
             documentController.appendRecordedActions(recordedActions)
-            selectedActionID = recordedActions.last?.id
+            selectedActionIDs = Set(recordedActions.last.map { [$0.id] } ?? [])
             editorConfiguration?.onRecordingStateChanged(false)
             return
         }
@@ -1184,9 +1291,9 @@ private struct SidebarSection<Content: View>: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(13)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 11))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay {
-            RoundedRectangle(cornerRadius: 11)
+            RoundedRectangle(cornerRadius: 12)
                 .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 1)
         }
     }

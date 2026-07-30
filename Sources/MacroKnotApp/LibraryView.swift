@@ -7,10 +7,12 @@ enum LibraryPlaybackPreviewState {
     case live
     case playing(iteration: Int)
     case failed(String)
+    case configured(rate: Double, repeatCount: Int)
 }
 
 struct LibraryView: View {
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var permissions: PermissionState
     @EnvironmentObject private var store: MacroLibraryStore
@@ -18,10 +20,12 @@ struct LibraryView: View {
     @StateObject private var globalCommandMonitor = GlobalCommandMonitor()
     @State private var searchText = ""
     @State private var playbackRate = 1.0
-    @State private var repetitionMode = RepetitionMode.finite
+    @State private var repetitionMode = RepetitionMode.once
     @State private var repeatCount = 1
     @State private var isDeleteConfirmationPresented = false
     @State private var isDraftRecoveryPresented = false
+    @State private var isDraftConflictPresented = false
+    @State private var pendingEditID: UUID?
     @State private var localErrorMessage: String?
     private let previewState: LibraryPlaybackPreviewState
 
@@ -31,6 +35,11 @@ struct LibraryView: View {
     ) {
         self.permissions = permissions
         self.previewState = previewState
+        if case .configured(let rate, let repeatCount) = previewState {
+            _playbackRate = State(initialValue: rate)
+            _repetitionMode = State(initialValue: .finite)
+            _repeatCount = State(initialValue: max(2, repeatCount))
+        }
     }
 
     var body: some View {
@@ -52,7 +61,10 @@ struct LibraryView: View {
                 newMacro: createMacro,
                 importMacro: importMacro,
                 saveMacro: nil,
-                exportMacro: store.selectedRecord == nil ? nil : exportSelectedMacro
+                exportMacro: store.selectedRecord == nil ? nil : exportSelectedMacro,
+                closeWindow: {
+                    NSApplication.shared.keyWindow?.performClose(nil)
+                }
             )
         )
         .alert("저장되지 않은 초안이 있습니다", isPresented: $isDraftRecoveryPresented) {
@@ -66,6 +78,20 @@ struct LibraryView: View {
             Button("취소", role: .cancel) {}
         } message: {
             Text("보관함에서 삭제되며 되돌릴 수 없습니다.")
+        }
+        .alert("다른 매크로의 초안이 있습니다", isPresented: $isDraftConflictPresented) {
+            Button("기존 초안 계속 편집") {
+                openRecoverableDraft()
+                pendingEditID = nil
+            }
+            Button("초안 삭제 후 편집", role: .destructive) {
+                replaceDraftAndEditPendingMacro()
+            }
+            Button("취소", role: .cancel) {
+                pendingEditID = nil
+            }
+        } message: {
+            Text("선택한 매크로를 편집하려면 현재 저장되지 않은 초안을 먼저 삭제해야 합니다.")
         }
         .onAppear(perform: handleAppearance)
         .onDisappear {
@@ -139,16 +165,18 @@ struct LibraryView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(13)
                                     .background(
-                                        Color(nsColor: .controlBackgroundColor),
-                                        in: RoundedRectangle(cornerRadius: 11)
+                                        store.selectedID == record.id
+                                            ? Color.accentColor.opacity(0.10)
+                                            : Color(nsColor: .controlBackgroundColor),
+                                        in: RoundedRectangle(cornerRadius: 12)
                                     )
                                     .overlay {
-                                        RoundedRectangle(cornerRadius: 11)
+                                        RoundedRectangle(cornerRadius: 12)
                                             .stroke(
                                                 store.selectedID == record.id
-                                                    ? Color.accentColor.opacity(0.8)
+                                                    ? Color.accentColor.opacity(0.28)
                                                     : Color(nsColor: .separatorColor).opacity(0.45),
-                                                lineWidth: store.selectedID == record.id ? 2 : 1
+                                                lineWidth: 1
                                             )
                                     }
                             }
@@ -268,93 +296,151 @@ struct LibraryView: View {
     }
 
     private func playbackCard(_ record: MacroLibraryRecord) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Label("실행 설정", systemImage: "play.circle")
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Text("실행 설정")
                     .font(.headline)
-                Spacer()
                 playbackStatus
-            }
-
-            HStack(alignment: .bottom, spacing: 12) {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("재생 속도")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                    Picker("재생 속도", selection: $playbackRate) {
-                        ForEach(PlaybackOptions.supportedRates, id: \.self) { rate in
-                            Text(rateLabel(rate)).tag(rate)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 88)
-                }
-
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("반복")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                    Picker("반복 방식", selection: $repetitionMode) {
-                        Text("횟수 지정").tag(RepetitionMode.finite)
-                        Text("무한 반복").tag(RepetitionMode.infinite)
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 155)
-                }
-
-                if repetitionMode == .finite {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("실행 횟수")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-                        Stepper("\(repeatCount)회", value: $repeatCount, in: 1...9_999)
-                            .frame(width: 96)
-                    }
-                }
-
                 Spacer()
 
                 if displayedPlayerState == .running {
                     Button(role: .destructive, action: player.stop) {
                         Label("실행 중지", systemImage: "stop.fill")
+                            .frame(minWidth: 84)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
                     .keyboardShortcut(.escape, modifiers: .control)
                 } else {
                     Button(action: { startPlayback(record.document) }) {
-                        Label("매크로 실행", systemImage: "play.fill")
+                        Label("실행 시작", systemImage: "play.fill")
+                            .frame(minWidth: 84)
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(record.document.actions.isEmpty || store.isRecording)
+                    .keyboardShortcut(.return, modifiers: [])
                 }
             }
 
-            HStack(spacing: 8) {
-                Image(systemName: "info.circle")
+            HStack(spacing: 10) {
+                Text("재생 속도")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 58, alignment: .leading)
+                HStack(spacing: 3) {
+                    ForEach(PlaybackOptions.supportedRates, id: \.self) { rate in
+                        CompactChoiceButton(
+                            title: rateLabel(rate),
+                            isSelected: playbackRate == rate
+                        ) {
+                            withAnimation(.easeOut(duration: 0.14)) {
+                                playbackRate = rate
+                            }
+                        }
+                    }
+                }
+                .padding(3)
+                .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+                .frame(maxWidth: .infinity)
+            }
+
+            HStack(spacing: 10) {
+                Text("반복")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 58, alignment: .leading)
+
+                HStack(spacing: 3) {
+                    CompactChoiceButton(
+                        title: "한 번",
+                        isSelected: repetitionMode == .once
+                    ) {
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            repetitionMode = .once
+                            repeatCount = 1
+                        }
+                    }
+                    CompactChoiceButton(
+                        title: "횟수 반복",
+                        isSelected: repetitionMode == .finite
+                    ) {
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            repetitionMode = .finite
+                            repeatCount = max(repeatCount, 2)
+                        }
+                    }
+                    CompactChoiceButton(
+                        title: "무한 반복",
+                        isSelected: repetitionMode == .infinite
+                    ) {
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            repetitionMode = .infinite
+                        }
+                    }
+                }
+                .padding(3)
+                .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+
+                if repetitionMode == .finite {
+                    HStack(spacing: 0) {
+                        Button {
+                            repeatCount = max(2, repeatCount - 1)
+                        } label: {
+                            Image(systemName: "minus")
+                                .frame(width: 28, height: 28)
+                        }
+                        .disabled(repeatCount <= 2)
+
+                        TextField("반복 횟수", value: $repeatCount, format: .number)
+                            .labelsHidden()
+                            .textFieldStyle(.plain)
+                            .multilineTextAlignment(.center)
+                            .font(.callout.weight(.semibold).monospacedDigit())
+                            .frame(width: 44)
+                            .onSubmit {
+                                repeatCount = min(max(2, repeatCount), 9_999)
+                            }
+
+                        Button {
+                            repeatCount = min(9_999, repeatCount + 1)
+                        } label: {
+                            Image(systemName: "plus")
+                                .frame(width: 28, height: 28)
+                        }
+                        .disabled(repeatCount >= 9_999)
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
+                }
+            }
+
+            HStack(spacing: 7) {
+                Image(systemName: "clock")
                 Text(playbackSummary(for: record.document))
                 Spacer()
+                Image(systemName: "escape")
                 Text("중지: Control + Escape")
             }
             .font(.caption)
             .foregroundStyle(.secondary)
         }
-        .padding(20)
-        .background(.background, in: RoundedRectangle(cornerRadius: 14))
+        .padding(16)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay {
-            RoundedRectangle(cornerRadius: 14)
+            RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.primary.opacity(0.08))
         }
     }
 
     private func actionPreview(_ actions: [MacroAction]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let previewItems = MacroActionPreviewItem.grouped(actions)
+        return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("액션 미리보기")
                     .font(.headline)
                 Spacer()
-                Text("총 \(actions.count)개")
+                Text(previewCountText(actionCount: actions.count, itemCount: previewItems.count))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -366,23 +452,26 @@ struct LibraryView: View {
                     description: Text("편집 창에서 녹화하거나 액션을 추가해 주세요.")
                 )
                 .frame(maxWidth: .infinity, minHeight: 180)
-                .background(.background, in: RoundedRectangle(cornerRadius: 14))
+                .background(
+                    Color(nsColor: .controlBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: 12)
+                )
             } else {
                 VStack(spacing: 0) {
-                    ForEach(Array(actions.prefix(8).enumerated()), id: \.element.id) { index, action in
+                    ForEach(Array(previewItems.enumerated()), id: \.element.id) { index, item in
                         HStack(spacing: 12) {
-                            Text("\(index + 1)")
+                            Text(item.sourceLabel)
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.tertiary)
-                                .frame(width: 24, alignment: .trailing)
-                            Image(systemName: action.kind.systemImage)
-                                .foregroundStyle(action.kind.tint)
+                                .frame(width: 42, alignment: .trailing)
+                            Image(systemName: item.kind.systemImage)
+                                .foregroundStyle(item.kind.tint)
                                 .frame(width: 26, height: 26)
-                                .background(action.kind.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
+                                .background(item.kind.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(action.kind.displayName)
+                                Text(item.title)
                                     .font(.callout.weight(.medium))
-                                Text(action.summary)
+                                Text(item.summary)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
@@ -391,23 +480,23 @@ struct LibraryView: View {
                         }
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
-                        if index < min(actions.count, 8) - 1 { Divider().padding(.leading, 62) }
-                    }
-                    if actions.count > 8 {
-                        Divider()
-                        Text("외 \(actions.count - 8)개 액션")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(10)
+                        if index < previewItems.count - 1 { Divider().padding(.leading, 80) }
                     }
                 }
-                .background(.background, in: RoundedRectangle(cornerRadius: 14))
+                .background(
+                    Color(nsColor: .controlBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: 12)
+                )
                 .overlay {
-                    RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08))
+                    RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08))
                 }
             }
         }
+    }
+
+    private func previewCountText(actionCount: Int, itemCount: Int) -> String {
+        guard actionCount != itemCount else { return "총 \(actionCount)개" }
+        return "\(actionCount)개 액션 · \(itemCount)단계로 정리"
     }
 
     private var emptyLibrary: some View {
@@ -459,7 +548,7 @@ struct LibraryView: View {
 
     private var displayedPlayerState: InputPlayer.State {
         switch previewState {
-        case .live: return player.state
+        case .live, .configured: return player.state
         case .playing: return .running
         case .failed(let message): return .failed(message)
         }
@@ -471,9 +560,18 @@ struct LibraryView: View {
     }
 
     private var playbackOptions: PlaybackOptions {
-        PlaybackOptions(
+        let repetition: PlaybackOptions.Repetition
+        switch repetitionMode {
+        case .once:
+            repetition = .finite(1)
+        case .finite:
+            repetition = .finite(max(2, repeatCount))
+        case .infinite:
+            repetition = .infinite
+        }
+        return PlaybackOptions(
             rate: playbackRate,
-            repetition: repetitionMode == .infinite ? .infinite : .finite(repeatCount)
+            repetition: repetition
         )
     }
 
@@ -483,8 +581,28 @@ struct LibraryView: View {
     }
 
     private func edit(_ id: UUID) {
+        if let draft = store.recoverableDraft, draft.document.id != id {
+            pendingEditID = id
+            isDraftConflictPresented = true
+            return
+        }
         guard let draft = store.beginEditing(id: id) else {
-            openRecoverableDraft()
+            localErrorMessage = "선택한 매크로를 편집할 수 없습니다. 보관함을 새로고침해 주세요."
+            return
+        }
+        openWindow(id: "macro-editor", value: draft.document.id)
+    }
+
+    private func replaceDraftAndEditPendingMacro() {
+        guard let id = pendingEditID else { return }
+        let oldDraftID = store.recoverableDraft?.document.id
+        if let oldDraftID {
+            dismissWindow(id: "macro-editor", value: oldDraftID)
+        }
+        store.discardDraft()
+        pendingEditID = nil
+        guard let draft = store.beginEditing(id: id) else {
+            localErrorMessage = "선택한 매크로를 편집할 수 없습니다."
             return
         }
         openWindow(id: "macro-editor", value: draft.document.id)
@@ -583,7 +701,7 @@ struct LibraryView: View {
         let duration = Double(document.actions.estimatedDurationMilliseconds) / playbackRate
         let durationText = MacroDurationFormatter.concise(milliseconds: boundedMilliseconds(duration))
         if repetitionMode == .infinite { return "약 \(durationText)마다 계속 반복합니다." }
-        if repeatCount == 1 { return "예상 실행 시간은 \(durationText)입니다." }
+        if repetitionMode == .once { return "예상 실행 시간은 \(durationText)입니다." }
         let total = boundedMilliseconds(duration * Double(repeatCount))
         return "\(repeatCount)회 반복 · 예상 \(MacroDurationFormatter.concise(milliseconds: total))"
     }
@@ -606,10 +724,14 @@ struct MacroEditorWindowView: View {
     @Environment(\.dismissWindow) private var dismissWindow
     @EnvironmentObject private var store: MacroLibraryStore
     @ObservedObject var permissions: PermissionState
+    @State private var isClosing = false
     let draftID: UUID
 
     var body: some View {
-        if let draft = store.recoverableDraft, draft.document.id == draftID {
+        if isClosing {
+            Color.clear
+                .frame(minWidth: 700, minHeight: 500)
+        } else if let draft = store.recoverableDraft, draft.document.id == draftID {
             ContentView(
                 permissions: permissions,
                 initialDocument: draft.document,
@@ -622,13 +744,21 @@ struct MacroEditorWindowView: View {
                     onRecordingStateChanged: store.setRecording,
                     onDraftChanged: store.autosaveDraft,
                     onSave: { document in
-                        try store.saveDraftToLibrary(document)
-                        dismissWindow(id: "macro-editor", value: draftID)
+                        isClosing = true
+                        do {
+                            try store.saveDraftToLibrary(document)
+                            closeEditorWindow()
+                        } catch {
+                            isClosing = false
+                            throw error
+                        }
                     },
                     onCancel: {
+                        isClosing = true
                         store.discardDraft()
-                        dismissWindow(id: "macro-editor", value: draftID)
-                    }
+                        closeEditorWindow()
+                    },
+                    onClose: closeEditorWindow
                 )
             )
             .navigationTitle(draft.mode == .create ? "새 매크로" : "매크로 편집")
@@ -643,11 +773,50 @@ struct MacroEditorWindowView: View {
             .frame(minWidth: 700, minHeight: 500)
         }
     }
+
+    private func closeEditorWindow() {
+        isClosing = true
+        DispatchQueue.main.async {
+            NSApplication.shared.windows
+                .first { $0.title == "새 매크로" || $0.title == "매크로 편집" }?
+                .close()
+        }
+    }
 }
 
 private enum RepetitionMode: String, CaseIterable {
+    case once
     case finite
     case infinite
+}
+
+struct CompactChoiceButton: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.callout.weight(isSelected ? .semibold : .regular))
+                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    isSelected ? Color(nsColor: .windowBackgroundColor) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+                .shadow(
+                    color: isSelected ? Color.black.opacity(0.10) : .clear,
+                    radius: 2,
+                    y: 1
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
 }
 
 private struct LibraryRow: View {

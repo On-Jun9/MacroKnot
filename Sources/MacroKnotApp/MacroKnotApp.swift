@@ -38,6 +38,7 @@ struct MacroCommands {
     let importMacro: (() -> Void)?
     let saveMacro: (() -> Void)?
     let exportMacro: (() -> Void)?
+    let closeWindow: (() -> Void)?
 }
 
 private struct MacroCommandsKey: FocusedValueKey {
@@ -67,6 +68,14 @@ private struct DocumentMenuCommands: Commands {
             }
             .keyboardShortcut("o", modifiers: .command)
             .disabled(macroCommands?.importMacro == nil)
+
+            Divider()
+
+            Button("창 닫기") {
+                macroCommands?.closeWindow?()
+            }
+            .keyboardShortcut("w", modifiers: .command)
+            .disabled(macroCommands?.closeWindow == nil)
         }
 
         CommandGroup(replacing: .saveItem) {

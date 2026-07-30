@@ -224,7 +224,9 @@ final class MacroLibraryStore: ObservableObject {
 
     @discardableResult
     func beginEditing(id: UUID) -> MacroDraftRecord? {
-        if let recoverableDraft { return recoverableDraft }
+        if let recoverableDraft {
+            return recoverableDraft.document.id == id ? recoverableDraft : nil
+        }
         guard let record = records.first(where: { $0.id == id }) else { return nil }
         let draft = MacroDraftRecord(
             mode: .edit,

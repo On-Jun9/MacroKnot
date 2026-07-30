@@ -168,6 +168,30 @@ func detectsCaptureActionsInsideRepeatBlocks() {
 }
 
 @Test
+func groupsConsecutiveMouseMovesForLibraryPreview() {
+    let actions = [
+        MacroAction(kind: .mouseMove, mouse: MousePayload(start: ScreenPoint(x: 10, y: 20))),
+        MacroAction(kind: .mouseMove, mouse: MousePayload(start: ScreenPoint(x: 20, y: 30))),
+        MacroAction(kind: .mouseMove, mouse: MousePayload(start: ScreenPoint(x: 30, y: 40))),
+        MacroAction.click(
+            point: ScreenPoint(x: 30, y: 40),
+            strategy: .screenCoordinate
+        ),
+        MacroAction(kind: .mouseMove, mouse: MousePayload(start: ScreenPoint(x: 50, y: 60))),
+        MacroAction(kind: .mouseMove, mouse: MousePayload(start: ScreenPoint(x: 60, y: 70))),
+    ]
+
+    let preview = MacroActionPreviewItem.grouped(actions)
+
+    #expect(preview.count == 3)
+    #expect(preview[0].sourceLabel == "1–3")
+    #expect(preview[0].title == "마우스 이동 ×3")
+    #expect(preview[0].summary == "(10, 20) → (30, 40) · 연속 이동 경로")
+    #expect(preview[1].kind == .click)
+    #expect(preview[2].sourceLabel == "5–6")
+}
+
+@Test
 func formatsDurationsWithoutUnnecessaryPrecision() {
     #expect(MacroDurationFormatter.concise(milliseconds: 0) == "0ms")
     #expect(MacroDurationFormatter.concise(milliseconds: 999) == "999ms")

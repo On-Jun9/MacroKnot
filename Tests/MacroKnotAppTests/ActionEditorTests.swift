@@ -123,6 +123,50 @@ func removesAllActionsFromCurrentDocument() {
     #expect(controller.document.actions.isEmpty)
 }
 
+@MainActor
+@Test
+func removesMultipleSelectedActionsTogether() {
+    let controller = DocumentController()
+    let first = MacroAction.wait(milliseconds: 100)
+    let second = MacroAction.keyboard(keyCode: 0, characters: "a", modifierFlags: 0)
+    let third = MacroAction.wait(milliseconds: 200)
+    controller.document.actions = [first, second, third]
+
+    controller.removeActions(ids: [first.id, third.id])
+
+    #expect(controller.document.actions.map(\.id) == [second.id])
+}
+
+@Test
+func detectsMacroEditorChangesAgainstItsOpeningSnapshot() {
+    let initial = MacroDocument(name: "새 매크로")
+
+    #expect(
+        !MacroEditorChangeDetection.hasUnsavedChanges(
+            initial: initial,
+            current: initial
+        )
+    )
+
+    var renamed = initial
+    renamed.name = "변경한 매크로"
+    #expect(
+        MacroEditorChangeDetection.hasUnsavedChanges(
+            initial: initial,
+            current: renamed
+        )
+    )
+
+    var actionAdded = initial
+    actionAdded.actions.append(.wait(milliseconds: 100))
+    #expect(
+        MacroEditorChangeDetection.hasUnsavedChanges(
+            initial: initial,
+            current: actionAdded
+        )
+    )
+}
+
 @Test
 func rejectsInvalidEditorValues() {
     var draft = ActionEditorDraft(kind: .drag)

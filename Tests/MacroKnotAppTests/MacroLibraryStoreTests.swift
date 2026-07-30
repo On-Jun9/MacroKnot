@@ -88,6 +88,28 @@ func duplicatesAndExportsStoredMacro() throws {
     #expect(try MacroDocumentCodec.load(from: exportURL).id == duplicateID)
 }
 
+@MainActor
+@Test
+func loadsSelectedLibraryDocumentForEditingAndRejectsDifferentDraft() throws {
+    let fixture = try LibraryStorageFixture()
+    let store = MacroLibraryStore(storage: fixture.storage)
+    let originalDraft = try #require(store.beginNewDraft())
+    var original = originalDraft.document
+    original.name = "편집할 매크로"
+    original.actions = [.wait(milliseconds: 200)]
+    try store.saveDraftToLibrary(original)
+
+    let editingDraft = try #require(store.beginEditing(id: original.id))
+    #expect(editingDraft.mode == .edit)
+    #expect(editingDraft.document == original)
+
+    store.discardDraft()
+    let unrelatedDraft = try #require(store.beginNewDraft())
+    #expect(unrelatedDraft.document.id != original.id)
+    #expect(store.beginEditing(id: original.id) == nil)
+    #expect(store.recoverableDraft?.document.id == unrelatedDraft.document.id)
+}
+
 private struct LibraryStorageFixture {
     let rootURL: URL
     let storage: MacroLibraryStorage

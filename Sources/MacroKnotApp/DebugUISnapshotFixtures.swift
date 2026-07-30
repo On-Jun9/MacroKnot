@@ -18,6 +18,8 @@ struct DebugUISnapshotRoot: View {
         switch configuration.fixture {
         case .empty:
             records = []
+        case .mouseHeavy:
+            records = Self.mouseHeavyRecords
         default:
             records = Self.previewRecords
         }
@@ -55,9 +57,18 @@ struct DebugUISnapshotRoot: View {
         case .populated:
             LibraryView(permissions: permissions)
                 .environmentObject(libraryStore)
+        case .mouseHeavy:
+            LibraryView(permissions: permissions)
+                .environmentObject(libraryStore)
         case .playing:
             LibraryView(permissions: permissions, previewState: .playing(iteration: 2))
                 .environmentObject(libraryStore)
+        case .playbackOptions:
+            LibraryView(
+                permissions: permissions,
+                previewState: .configured(rate: 1.5, repeatCount: 3)
+            )
+            .environmentObject(libraryStore)
         case .error:
             LibraryView(
                 permissions: permissions,
@@ -79,9 +90,11 @@ struct DebugUISnapshotRoot: View {
                 )
             )
         case .macroEditor:
+            let document = Self.populatedDocument
             ContentView(
                 permissions: permissions,
-                initialDocument: Self.populatedDocument,
+                initialDocument: document,
+                initialSelectedActionIDs: Set(document.actions[1...3].map(\.id)),
                 editorConfiguration: MacroEditorConfiguration(
                     startRecording: false,
                     isPlaybackRunning: { false },
@@ -89,7 +102,8 @@ struct DebugUISnapshotRoot: View {
                     onRecordingStateChanged: { _ in },
                     onDraftChanged: { _ in },
                     onSave: { _ in },
-                    onCancel: {}
+                    onCancel: {},
+                    onClose: {}
                 )
             )
         case .editor:
@@ -152,6 +166,45 @@ struct DebugUISnapshotRoot: View {
             originalCreatedAt: Date(timeIntervalSince1970: 1_785_260_400),
             updatedAt: Date(timeIntervalSince1970: 1_785_346_800)
         )
+    }
+
+    private static var mouseHeavyRecords: [MacroLibraryRecord] {
+        var actions: [MacroAction] = []
+        for index in 0..<120 {
+            let point = ScreenPoint(
+                x: Double(120 + index * 4),
+                y: Double(240 + index)
+            )
+            actions.append(MacroAction(
+                kind: .mouseMove,
+                targetStrategy: .screenCoordinate,
+                mouse: MousePayload(start: point)
+            ))
+        }
+        actions.append(MacroAction.click(
+            point: ScreenPoint(x: 600, y: 360),
+            strategy: .screenCoordinate
+        ))
+        for index in 0..<10 {
+            let point = ScreenPoint(
+                x: Double(600 + index * 8),
+                y: Double(360 + index * 3)
+            )
+            actions.append(MacroAction(
+                kind: .mouseMove,
+                targetStrategy: .screenCoordinate,
+                mouse: MousePayload(start: point)
+            ))
+        }
+        actions.append(MacroAction.keyboard(keyCode: 36, characters: nil, modifierFlags: 0))
+        actions.append(MacroAction.wait(milliseconds: 500))
+        let document = MacroDocument(
+            name: "스크롤 자료 정리",
+            actions: actions,
+            displayConfiguration: DisplayConfigurationProvider.current()
+        )
+        let date = Date(timeIntervalSince1970: 1_785_346_800)
+        return [MacroLibraryRecord(document: document, createdAt: date, modifiedAt: date)]
     }
 
     private static var editorDraft: ActionEditorDraft {
@@ -245,6 +298,8 @@ private struct UISnapshotConfiguration {
         case populated
         case recording
         case playing
+        case playbackOptions = "playback-options"
+        case mouseHeavy = "mouse-heavy"
         case error
         case editor
         case macroEditor = "macro-editor"

@@ -168,6 +168,72 @@ enum MacroDurationFormatter {
     }
 }
 
+struct MacroActionPreviewItem: Identifiable {
+    let id: UUID
+    let startIndex: Int
+    let endIndex: Int
+    let firstAction: MacroAction
+    let lastAction: MacroAction
+
+    var kind: MacroAction.Kind { firstAction.kind }
+    var count: Int { endIndex - startIndex + 1 }
+
+    var sourceLabel: String {
+        startIndex == endIndex
+            ? "\(startIndex + 1)"
+            : "\(startIndex + 1)–\(endIndex + 1)"
+    }
+
+    var title: String {
+        count > 1 && kind == .mouseMove
+            ? "마우스 이동 ×\(count)"
+            : kind.displayName
+    }
+
+    var summary: String {
+        guard count > 1, kind == .mouseMove,
+              let start = firstAction.mouse?.start,
+              let end = lastAction.mouse?.start else {
+            return firstAction.summary
+        }
+        return "\(Self.pointText(start)) → \(Self.pointText(end)) · 연속 이동 경로"
+    }
+
+    static func grouped(_ actions: [MacroAction]) -> [Self] {
+        var result: [Self] = []
+        var index = 0
+        while index < actions.count {
+            let first = actions[index]
+            var endIndex = index
+            if first.kind == .mouseMove {
+                while endIndex + 1 < actions.count,
+                      actions[endIndex + 1].kind == .mouseMove {
+                    endIndex += 1
+                }
+            }
+            result.append(Self(
+                id: first.id,
+                startIndex: index,
+                endIndex: endIndex,
+                firstAction: first,
+                lastAction: actions[endIndex]
+            ))
+            index = endIndex + 1
+        }
+        return result
+    }
+
+    private static func pointText(_ point: ScreenPoint) -> String {
+        "(\(number(point.x)), \(number(point.y)))"
+    }
+
+    private static func number(_ value: Double) -> String {
+        value.rounded() == value
+            ? String(format: "%.0f", value)
+            : String(format: "%.1f", value)
+    }
+}
+
 extension KeyboardPayload.EventKind {
     fileprivate var presentationName: String {
         switch self {

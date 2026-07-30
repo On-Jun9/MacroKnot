@@ -147,6 +147,25 @@ final class DocumentController: ObservableObject {
         )
     }
 
+    func removeActions(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        if ids.count == 1, let id = ids.first {
+            removeAction(id: id)
+            return
+        }
+        let removedActions = document.actions.filter { ids.contains($0.id) }
+        guard !removedActions.isEmpty else { return }
+        document.actions.removeAll { ids.contains($0.id) }
+        RuntimeEventLogger.record(
+            "actions_removed",
+            result: "PASS",
+            fields: [
+                "action_count": String(removedActions.count),
+                "kinds": removedActions.map { $0.kind.rawValue }.joined(separator: ","),
+            ]
+        )
+    }
+
     func removeAllActions() {
         guard !document.actions.isEmpty else { return }
         let removedCount = document.actions.count
