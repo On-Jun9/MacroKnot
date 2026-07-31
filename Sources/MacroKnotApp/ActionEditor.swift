@@ -154,6 +154,10 @@ struct ActionEditorDraft: Identifiable {
                 )
             )
         case .capture:
+            guard !destinationDirectory
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ActionDraftError.invalidField("저장 폴더")
+            }
             action = MacroAction(
                 id: id,
                 kind: .capture,
