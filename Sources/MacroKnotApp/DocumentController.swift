@@ -7,8 +7,23 @@ final class DocumentController: ObservableObject {
     @Published var document = MacroDocument(name: "새 매크로")
     @Published private(set) var currentURL: URL?
     @Published private(set) var errorMessage: String?
+    // 다른 앱의 복사로 pasteboard가 교체될 수 있으므로 캐시하지 않고 실시간으로 조회한다.
+    var canPasteActions: Bool {
+        ActionPasteboard.containsActions(in: pasteboard)
+    }
 
-    init(initialDocument: MacroDocument? = nil) {
+    /// 편집 창의 `\.undoManager`를 그대로 사용한다.
+    weak var undoManager: UndoManager?
+    /// 녹화 중에는 문서를 바꾸는 조작을 실행 취소 기록에 남기지 않는다.
+    var isRecordingInProgress = false
+
+    private let pasteboard: NSPasteboard
+
+    init(
+        initialDocument: MacroDocument? = nil,
+        pasteboard: NSPasteboard = .general
+    ) {
+        self.pasteboard = pasteboard
         if let initialDocument {
             document = initialDocument
         } else {
@@ -80,15 +95,19 @@ final class DocumentController: ObservableObject {
     }
 
     func appendRecordedActions(_ actions: [MacroAction]) {
+        guard !actions.isEmpty else { return }
+        registerUndoSnapshot(actionName: "녹화 액션 추가")
         ensureDisplayConfiguration(for: actions)
         document.actions.append(contentsOf: actions)
     }
 
     func addWaitAction(milliseconds: UInt64 = 1_000) {
+        registerUndoSnapshot(actionName: "액션 추가")
         document.actions.append(.wait(milliseconds: milliseconds))
     }
 
     func addAction(_ action: MacroAction) {
+        registerUndoSnapshot(actionName: "액션 추가")
         ensureDisplayConfiguration(for: [action])
         document.actions.append(action)
         errorMessage = nil
@@ -99,6 +118,7 @@ final class DocumentController: ObservableObject {
         guard let index = document.actions.firstIndex(where: { $0.id == action.id }) else {
             return
         }
+        registerUndoSnapshot(actionName: "액션 편집")
         document.actions[index] = action
         ensureDisplayConfiguration(for: document.actions)
         errorMessage = nil
@@ -116,6 +136,7 @@ final class DocumentController: ObservableObject {
         let selected = Array(document.actions[startIndex...endIndex])
         let repeatAction = MacroAction.repeatBlock(count: count, actions: selected)
         try repeatAction.validate()
+        registerUndoSnapshot(actionName: "범위 반복 묶기")
         document.actions.replaceSubrange(startIndex...endIndex, with: [repeatAction])
         errorMessage = nil
         RuntimeEventLogger.record(
@@ -139,6 +160,7 @@ final class DocumentController: ObservableObject {
 
     func removeAction(id: UUID) {
         let removedKind = document.actions.first(where: { $0.id == id })?.kind.rawValue
+        registerUndoSnapshot(actionName: "액션 삭제")
         document.actions.removeAll { $0.id == id }
         RuntimeEventLogger.record(
             "action_removed",
@@ -155,6 +177,7 @@ final class DocumentController: ObservableObject {
         }
         let removedActions = document.actions.filter { ids.contains($0.id) }
         guard !removedActions.isEmpty else { return }
+        registerUndoSnapshot(actionName: "액션 삭제")
         document.actions.removeAll { ids.contains($0.id) }
         RuntimeEventLogger.record(
             "actions_removed",
@@ -169,6 +192,7 @@ final class DocumentController: ObservableObject {
     func removeAllActions() {
         guard !document.actions.isEmpty else { return }
         let removedCount = document.actions.count
+        registerUndoSnapshot(actionName: "모든 액션 삭제")
         document.actions.removeAll()
         errorMessage = nil
         RuntimeEventLogger.record(
@@ -182,6 +206,7 @@ final class DocumentController: ObservableObject {
         guard let source = document.actions.firstIndex(where: { $0.id == id }) else { return }
         let destination = source + offset
         guard document.actions.indices.contains(destination) else { return }
+        registerUndoSnapshot(actionName: "액션 순서 변경")
         document.actions.swapAt(source, destination)
         RuntimeEventLogger.record(
             "action_moved",
@@ -196,6 +221,7 @@ final class DocumentController: ObservableObject {
               (0...document.actions.count).contains(toOffset) else { return }
 
         let movedActions = validOffsets.map { document.actions[$0] }
+        registerUndoSnapshot(actionName: "액션 순서 변경")
         for index in validOffsets.reversed() {
             document.actions.remove(at: index)
         }
@@ -213,6 +239,89 @@ final class DocumentController: ObservableObject {
                 "destination": String(insertionIndex + 1),
             ]
         )
+    }
+
+    func copyActions(ids: Set<UUID>) {
+        let copied = document.actions.filter { ids.contains($0.id) }
+        guard !copied.isEmpty,
+              ActionPasteboard.write(copied, to: pasteboard) else { return }
+        RuntimeEventLogger.record(
+            "actions_copied",
+            result: "PASS",
+            fields: ["action_count": String(copied.count)]
+        )
+    }
+
+    /// 붙여넣은 액션의 식별자를 돌려준다. 붙여넣을 내용이 없으면 빈 배열이다.
+    @discardableResult
+    func pasteActions(after ids: Set<UUID>) -> [UUID] {
+        let pasted = ActionPasteboard.read(from: pasteboard).map { $0.withNewIdentifiers() }
+        guard !pasted.isEmpty else { return [] }
+        insertCopies(pasted, after: ids, actionName: "액션 붙여넣기")
+        RuntimeEventLogger.record(
+            "actions_pasted",
+            result: "PASS",
+            fields: ["action_count": String(pasted.count)]
+        )
+        return pasted.map(\.id)
+    }
+
+    /// 복제한 액션의 식별자를 돌려준다. 선택이 비어 있으면 빈 배열이다.
+    @discardableResult
+    func duplicateActions(ids: Set<UUID>) -> [UUID] {
+        let duplicated = document.actions
+            .filter { ids.contains($0.id) }
+            .map { $0.withNewIdentifiers() }
+        guard !duplicated.isEmpty else { return [] }
+        insertCopies(duplicated, after: ids, actionName: "액션 복제")
+        RuntimeEventLogger.record(
+            "actions_duplicated",
+            result: "PASS",
+            fields: ["action_count": String(duplicated.count)]
+        )
+        return duplicated.map(\.id)
+    }
+
+    private func insertCopies(
+        _ copies: [MacroAction],
+        after ids: Set<UUID>,
+        actionName: String
+    ) {
+        let lastSelectedIndex = document.actions.lastIndex { ids.contains($0.id) }
+        let insertionIndex = lastSelectedIndex.map { $0 + 1 } ?? document.actions.endIndex
+        registerUndoSnapshot(actionName: actionName)
+        ensureDisplayConfiguration(for: copies)
+        document.actions.insert(contentsOf: copies, at: insertionIndex)
+        errorMessage = nil
+    }
+
+    /// 변경 직전 액션 상태를 실행 취소로 등록한다.
+    /// 복원 메서드가 복원 직전 상태를 다시 등록하므로 재실행도 같은 경로로 성립한다.
+    private func registerUndoSnapshot(actionName: String) {
+        guard !isRecordingInProgress else { return }
+        pushUndoSnapshot(actionName: actionName)
+    }
+
+    private func pushUndoSnapshot(actionName: String) {
+        guard let undoManager else { return }
+        let snapshot = ActionsSnapshot(
+            actions: document.actions,
+            displayConfiguration: document.displayConfiguration
+        )
+        undoManager.registerUndo(withTarget: self) { controller in
+            MainActor.assumeIsolated {
+                controller.restore(snapshot, actionName: actionName)
+            }
+        }
+        undoManager.setActionName(actionName)
+    }
+
+    /// 매크로 이름은 실행 취소 대상이 아니므로 스냅샷에서 되돌리지 않는다.
+    private func restore(_ snapshot: ActionsSnapshot, actionName: String) {
+        pushUndoSnapshot(actionName: actionName)
+        document.actions = snapshot.actions
+        document.displayConfiguration = snapshot.displayConfiguration
+        errorMessage = nil
     }
 
     private func save(to url: URL) {
@@ -269,6 +378,24 @@ final class DocumentController: ObservableObject {
         let trimmed = document.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let base = trimmed.isEmpty ? "새 매크로" : trimmed
         return "\(base).json"
+    }
+}
+
+private struct ActionsSnapshot: Sendable {
+    let actions: [MacroAction]
+    let displayConfiguration: DisplayConfiguration?
+}
+
+extension MacroAction {
+    /// 붙여넣기·복제로 만든 액션이 원본과 같은 식별자를 쓰지 않게 한다.
+    fileprivate func withNewIdentifiers() -> MacroAction {
+        var copy = self
+        copy.id = UUID()
+        if var repeatPayload = copy.repeatBlock {
+            repeatPayload.actions = repeatPayload.actions.map { $0.withNewIdentifiers() }
+            copy.repeatBlock = repeatPayload
+        }
+        return copy
     }
 }
 

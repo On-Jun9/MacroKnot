@@ -69,7 +69,11 @@ struct LibraryView: View {
                 exportMacro: store.selectedRecord == nil ? nil : exportSelectedMacro,
                 closeWindow: {
                     NSApplication.shared.keyWindow?.performClose(nil)
-                }
+                },
+                duplicateActions: nil,
+                deleteMacro: store.selectedRecord == nil
+                    ? nil
+                    : { isDeleteConfirmationPresented = true }
             )
         )
         .alert("저장되지 않은 초안이 있습니다", isPresented: $isDraftRecoveryPresented) {
