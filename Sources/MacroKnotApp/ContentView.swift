@@ -144,6 +144,7 @@ extension Notification.Name {
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.undoManager) private var undoManager
     @ObservedObject var permissions: PermissionState
     @StateObject private var documentController: DocumentController
     @StateObject private var recorder = InputRecorder()
@@ -224,6 +225,19 @@ struct ContentView: View {
                 }
             }
         }
+        .background {
+            if editorConfiguration != nil {
+                EditorActionCommands(
+                    onCopy: canCopySelectedActions ? copySelectedActions : nil,
+                    onPaste: isRecordingPresented ? nil : pasteCopiedActions,
+                    canPaste: { [weak documentController] in
+                        documentController?.canPasteActions ?? false
+                    },
+                    onCancel: cancelEditor
+                )
+            }
+        }
+        .onExitCommand(perform: editorConfiguration == nil ? nil : cancelEditor)
         .sheet(item: $actionEditorDraft) { draft in
             ActionEditorSheet(draft: draft) { action in
                 if documentController.document.actions.contains(where: { $0.id == action.id }) {
@@ -253,7 +267,7 @@ struct ContentView: View {
             }
             Button("취소", role: .cancel) {}
         } message: {
-            Text("현재 문서의 액션이 모두 삭제됩니다. 이 작업은 되돌릴 수 없습니다.")
+            Text("현재 문서의 액션이 모두 삭제됩니다.")
         }
         .alert("초안 편집을 취소할까요?", isPresented: $isCancelConfirmationPresented) {
             Button("초안 삭제", role: .destructive) {
@@ -264,12 +278,22 @@ struct ContentView: View {
         } message: {
             Text("지금까지 편집한 초안이 삭제됩니다.")
         }
-        .onAppear(perform: handleAppearance)
+        .onAppear {
+            documentController.undoManager = undoManager
+            handleAppearance()
+        }
+        .onChange(of: undoManager) { _, manager in
+            documentController.undoManager = manager
+        }
         .onDisappear {
+            // undo 스택은 컨트롤러를 강하게 잡지 않으므로, 뷰가 내려갈 때
+            // 창의 UndoManager에 남은 항목을 정리해 해제 후 접근을 막는다.
+            documentController.undoManager?.removeAllActions(withTarget: documentController)
             globalCommandMonitor.stop()
             autosaveTask?.cancel()
             if recorder.isRecording {
                 recorder.stop()
+                documentController.isRecordingInProgress = false
                 documentController.appendRecordedActions(recorder.actions)
                 editorConfiguration?.onRecordingStateChanged(false)
             }
@@ -1169,6 +1193,10 @@ struct ContentView: View {
         return documentController.currentURL?.lastPathComponent ?? "아직 저장되지 않음"
     }
 
+    private var canCopySelectedActions: Bool {
+        !selectedActionIDs.isEmpty && !isRecordingPresented
+    }
+
     private var focusedMacroCommands: MacroCommands {
         if editorConfiguration != nil {
             return MacroCommands(
@@ -1176,7 +1204,9 @@ struct ContentView: View {
                 importMacro: nil,
                 saveMacro: saveEditor,
                 exportMacro: nil,
-                closeWindow: { cancelEditor() }
+                closeWindow: { cancelEditor() },
+                duplicateActions: canCopySelectedActions ? duplicateSelectedActions : nil,
+                deleteMacro: nil
             )
         }
         return MacroCommands(
@@ -1186,7 +1216,9 @@ struct ContentView: View {
             exportMacro: documentController.saveDocumentAs,
             closeWindow: {
                 NSApplication.shared.keyWindow?.performClose(nil)
-            }
+            },
+            duplicateActions: nil,
+            deleteMacro: nil
         )
     }
 
@@ -1232,11 +1264,9 @@ struct ContentView: View {
                 toggleRecording(triggeredByGlobalShortcut: true)
             }
         }
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(120))
-            isMacroNameFocused = false
-            NSApplication.shared.keyWindow?.makeFirstResponder(nil)
-        }
+        // 창이 열리며 이름 필드에 자동 할당된 초기 포커스를 첫 프레임 전에 해제한다.
+        isMacroNameFocused = false
+        NSApplication.shared.keyWindow?.makeFirstResponder(nil)
     }
 
     private func saveEditor() {
@@ -1286,6 +1316,22 @@ struct ContentView: View {
         selectedActionIDs.removeAll()
     }
 
+    private func copySelectedActions() {
+        documentController.copyActions(ids: selectedActionIDs)
+    }
+
+    private func pasteCopiedActions() {
+        let pastedIDs = documentController.pasteActions(after: selectedActionIDs)
+        guard !pastedIDs.isEmpty else { return }
+        selectedActionIDs = Set(pastedIDs)
+    }
+
+    private func duplicateSelectedActions() {
+        let duplicatedIDs = documentController.duplicateActions(ids: selectedActionIDs)
+        guard !duplicatedIDs.isEmpty else { return }
+        selectedActionIDs = Set(duplicatedIDs)
+    }
+
     private func moveActions(fromOffsets: IndexSet, toOffset: Int) {
         documentController.moveActions(fromOffsets: fromOffsets, toOffset: toOffset)
     }
@@ -1307,6 +1353,9 @@ struct ContentView: View {
     private func toggleRecording(triggeredByGlobalShortcut: Bool = false) {
         if recorder.isRecording {
             recorder.stop(discardingTrailingShortcutModifiers: triggeredByGlobalShortcut)
+            // 녹화로 모인 액션은 한 번의 실행 취소로 되돌릴 수 있어야 하므로
+            // 문서에 반영하기 전에 녹화 상태를 먼저 해제한다.
+            documentController.isRecordingInProgress = false
             let recordedActions = recorder.actions
             documentController.appendRecordedActions(recordedActions)
             selectedActionIDs = Set(recordedActions.last.map { [$0.id] } ?? [])
@@ -1324,6 +1373,7 @@ struct ContentView: View {
             excludesEventsTargetingMacroKnot: excludesEventsTargetingMacroKnot,
             suppressesInitialShortcutModifierReleases: triggeredByGlobalShortcut
         )
+        documentController.isRecordingInProgress = recorder.isRecording
         editorConfiguration?.onRecordingStateChanged(recorder.isRecording)
     }
 

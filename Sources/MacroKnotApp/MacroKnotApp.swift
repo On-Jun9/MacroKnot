@@ -56,6 +56,8 @@ struct MacroCommands {
     let saveMacro: (() -> Void)?
     let exportMacro: (() -> Void)?
     let closeWindow: (() -> Void)?
+    let duplicateActions: (() -> Void)?
+    let deleteMacro: (() -> Void)?
 }
 
 private struct MacroCommandsKey: FocusedValueKey {
@@ -93,6 +95,21 @@ private struct DocumentMenuCommands: Commands {
             }
             .keyboardShortcut("w", modifiers: .command)
             .disabled(macroCommands?.closeWindow == nil)
+        }
+
+        // 복사·붙여넣기는 표준 편집 메뉴 항목을 그대로 쓰고 편집 창의 응답자가 처리한다.
+        CommandGroup(after: .pasteboard) {
+            Button("액션 복제") {
+                macroCommands?.duplicateActions?()
+            }
+            .keyboardShortcut("d", modifiers: .command)
+            .disabled(macroCommands?.duplicateActions == nil)
+
+            Button("선택한 매크로 삭제…") {
+                macroCommands?.deleteMacro?()
+            }
+            .keyboardShortcut(.delete, modifiers: .command)
+            .disabled(macroCommands?.deleteMacro == nil)
         }
 
         CommandGroup(replacing: .saveItem) {
