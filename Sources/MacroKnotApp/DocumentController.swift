@@ -190,6 +190,31 @@ final class DocumentController: ObservableObject {
         )
     }
 
+    func moveActions(fromOffsets: IndexSet, toOffset: Int) {
+        let validOffsets = fromOffsets.filter { document.actions.indices.contains($0) }
+        guard !validOffsets.isEmpty,
+              (0...document.actions.count).contains(toOffset) else { return }
+
+        let movedActions = validOffsets.map { document.actions[$0] }
+        for index in validOffsets.reversed() {
+            document.actions.remove(at: index)
+        }
+        let removedBeforeDestination = validOffsets.count { $0 < toOffset }
+        let insertionIndex = min(
+            max(toOffset - removedBeforeDestination, 0),
+            document.actions.endIndex
+        )
+        document.actions.insert(contentsOf: movedActions, at: insertionIndex)
+        RuntimeEventLogger.record(
+            "actions_reordered",
+            result: "PASS",
+            fields: [
+                "action_count": String(movedActions.count),
+                "destination": String(insertionIndex + 1),
+            ]
+        )
+    }
+
     private func save(to url: URL) {
         do {
             try MacroDocumentCodec.save(document, to: url)

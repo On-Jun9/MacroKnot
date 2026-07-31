@@ -33,6 +33,47 @@ func savesLoadsEditsAndDeletesLibraryRecords() throws {
 
 @MainActor
 @Test
+func silentlyDiscardsDraftOnlyWhenNothingWouldBeLost() throws {
+    let fixture = try LibraryStorageFixture()
+    let store = MacroLibraryStore(storage: fixture.storage)
+
+    #expect(store.discardDraftIfNothingWouldBeLost())
+
+    _ = try #require(store.beginNewDraft())
+    #expect(store.discardDraftIfNothingWouldBeLost())
+    #expect(store.recoverableDraft == nil)
+
+    var draft = try #require(store.beginNewDraft())
+    draft.document.actions = [.wait(milliseconds: 100)]
+    store.autosaveDraft(draft.document)
+    #expect(!store.discardDraftIfNothingWouldBeLost())
+    #expect(store.recoverableDraft != nil)
+    store.discardDraft()
+}
+
+@MainActor
+@Test
+func silentlyDiscardsEditDraftOnlyWhenSameAsLibraryOriginal() throws {
+    let fixture = try LibraryStorageFixture()
+    let store = MacroLibraryStore(storage: fixture.storage)
+    var document = try #require(store.beginNewDraft()).document
+    document.name = "업무 자동화"
+    document.actions = [.wait(milliseconds: 100)]
+    try store.saveDraftToLibrary(document)
+
+    _ = try #require(store.beginEditing(id: document.id))
+    #expect(store.discardDraftIfNothingWouldBeLost())
+    #expect(store.recoverableDraft == nil)
+
+    var changed = try #require(store.beginEditing(id: document.id))
+    changed.document.actions.append(.wait(milliseconds: 200))
+    store.autosaveDraft(changed.document)
+    #expect(!store.discardDraftIfNothingWouldBeLost())
+    #expect(store.recoverableDraft != nil)
+}
+
+@MainActor
+@Test
 func recoversAndDiscardsHiddenDraft() throws {
     let fixture = try LibraryStorageFixture()
     let store = MacroLibraryStore(storage: fixture.storage)

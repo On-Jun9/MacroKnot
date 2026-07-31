@@ -20,6 +20,7 @@ struct MacroDraftRecord: Codable, Equatable, Sendable {
     }
 
     static let currentStorageVersion = 1
+    static let defaultName = "새 매크로"
 
     var storageVersion = Self.currentStorageVersion
     var mode: Mode
@@ -211,7 +212,7 @@ final class MacroLibraryStore: ObservableObject {
         let timestamp = now()
         let draft = MacroDraftRecord(
             mode: .create,
-            document: MacroDocument(name: "새 매크로"),
+            document: MacroDocument(name: MacroDraftRecord.defaultName),
             originalCreatedAt: timestamp,
             updatedAt: timestamp
         )
@@ -270,6 +271,22 @@ final class MacroLibraryStore: ObservableObject {
         recoverableDraft = nil
         recordingRequestedForDraftID = nil
         reload(selecting: document.id)
+    }
+
+    /// 삭제해도 잃을 내용이 없는 초안이면 조용히 정리한다.
+    /// 정리했거나 초안이 없으면 true, 실제 내용이 있어 확인이 필요하면 false.
+    func discardDraftIfNothingWouldBeLost() -> Bool {
+        guard let draft = recoverableDraft else { return true }
+        let original = records.first { $0.id == draft.document.id }?.document
+        if MacroEditorCancelPolicy.requiresConfirmation(
+            mode: draft.mode,
+            current: draft.document,
+            original: original
+        ) {
+            return false
+        }
+        discardDraft()
+        return true
     }
 
     func discardDraft() {

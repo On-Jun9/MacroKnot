@@ -3,7 +3,24 @@ import SwiftUI
 @main
 struct MacroKnotApp: App {
     @StateObject private var permissions = PermissionState()
-    @StateObject private var libraryStore = MacroLibraryStore()
+    @StateObject private var libraryStore = MacroKnotApp.makeLibraryStore()
+
+    private static func makeLibraryStore() -> MacroLibraryStore {
+#if DEBUG
+        // 자동 UI 흐름 시험이 사용자 실제 보관함·초안을 건드리지 않도록 격리한다.
+        if let argument = ProcessInfo.processInfo.arguments.first(where: {
+            $0.hasPrefix("--debug-store-root=")
+        }) {
+            let path = String(argument.dropFirst("--debug-store-root=".count))
+            return MacroLibraryStore(
+                storage: MacroLibraryStorage(
+                    rootURL: URL(filePath: path, directoryHint: .isDirectory)
+                )
+            )
+        }
+#endif
+        return MacroLibraryStore()
+    }
 
     var body: some Scene {
         WindowGroup {

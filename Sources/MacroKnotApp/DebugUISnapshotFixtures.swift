@@ -43,6 +43,12 @@ struct DebugUISnapshotRoot: View {
                 .background {
                     UISnapshotCaptureView()
                 }
+        } else if configuration.fixture == .macroEditorCancelFlow {
+            MacroEditorCancelFlowFixture(scenario: .cancelWithChanges)
+        } else if configuration.fixture == .macroEditorCancelDirectFlow {
+            MacroEditorCancelFlowFixture(scenario: .cancelWithoutChanges)
+        } else if configuration.fixture == .macroEditorCancelRecoveredFlow {
+            MacroEditorCancelFlowFixture(scenario: .cancelRecoveredDraft)
         } else {
             LibraryView(permissions: permissions)
         }
@@ -91,19 +97,23 @@ struct DebugUISnapshotRoot: View {
             )
         case .macroEditor:
             let document = Self.populatedDocument
-            ContentView(
-                permissions: permissions,
-                initialDocument: document,
-                initialSelectedActionIDs: Set(document.actions[1...3].map(\.id)),
-                editorConfiguration: MacroEditorConfiguration(
-                    startRecording: false,
-                    isPlaybackRunning: { false },
-                    onRecordingRequestHandled: {},
-                    onRecordingStateChanged: { _ in },
-                    onDraftChanged: { _ in },
-                    onSave: { _ in },
-                    onCancel: {},
-                    onClose: {}
+            macroEditorFixture(
+                document: document,
+                selectedActionIDs: Set(document.actions[1...3].map(\.id))
+            )
+        case .macroEditorEmpty:
+            macroEditorFixture(
+                document: MacroDocument(
+                    name: "새 매크로",
+                    displayConfiguration: DisplayConfigurationProvider.current()
+                )
+            )
+        case .macroEditorRecording:
+            macroEditorFixture(
+                document: Self.recordingDocument,
+                previewState: .recording(
+                    actions: Array(Self.sampleActions.prefix(12)),
+                    lastEvent: "마우스 이동 → 포인터 경로"
                 )
             )
         case .editor:
@@ -114,6 +124,12 @@ struct DebugUISnapshotRoot: View {
             CoordinatePickerFlowFixture(automatedAction: .select)
         case .coordinatePickerCancelFlow:
             CoordinatePickerFlowFixture(automatedAction: .cancel)
+        case .macroEditorCancelFlow:
+            MacroEditorCancelFlowFixture(scenario: .cancelWithChanges)
+        case .macroEditorCancelDirectFlow:
+            MacroEditorCancelFlowFixture(scenario: .cancelWithoutChanges)
+        case .macroEditorCancelRecoveredFlow:
+            MacroEditorCancelFlowFixture(scenario: .cancelRecoveredDraft)
         case .settings:
             SettingsView(permissions: permissions)
         case .settingsRecording:
@@ -121,6 +137,29 @@ struct DebugUISnapshotRoot: View {
         case .settingsShortcuts:
             SettingsView(permissions: permissions, initialTab: .shortcuts)
         }
+    }
+
+    private func macroEditorFixture(
+        document: MacroDocument,
+        selectedActionIDs: Set<UUID> = [],
+        previewState: WorkspacePreviewState = .live
+    ) -> some View {
+        ContentView(
+            permissions: permissions,
+            initialDocument: document,
+            initialSelectedActionIDs: selectedActionIDs,
+            previewState: previewState,
+            editorConfiguration: MacroEditorConfiguration(
+                startRecording: false,
+                isPlaybackRunning: { false },
+                onRecordingRequestHandled: {},
+                onRecordingStateChanged: { _ in },
+                onDraftChanged: { _ in },
+                shouldConfirmCancel: { _ in false },
+                onSave: { _ in },
+                onCancel: {}
+            )
+        )
     }
 
     private static var populatedDocument: MacroDocument {
@@ -303,6 +342,11 @@ private struct UISnapshotConfiguration {
         case error
         case editor
         case macroEditor = "macro-editor"
+        case macroEditorEmpty = "macro-editor-empty"
+        case macroEditorRecording = "macro-editor-recording"
+        case macroEditorCancelFlow = "macro-editor-cancel-flow"
+        case macroEditorCancelDirectFlow = "macro-editor-cancel-direct-flow"
+        case macroEditorCancelRecoveredFlow = "macro-editor-cancel-recovered-flow"
         case draftRecovery = "draft-recovery"
         case coordinatePicker = "coordinate-picker"
         case coordinatePickerFlow = "coordinate-picker-flow"
@@ -431,6 +475,199 @@ private struct CoordinatePickerFlowFixture: View {
             .post(tap: .cghidEventTap)
         CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: false)?
             .post(tap: .cghidEventTap)
+    }
+}
+
+extension Notification.Name {
+    static let debugMacroEditorAppendWaitAction = Notification.Name(
+        "dev.macroknot.debug.editor-append-wait-action"
+    )
+    static let debugMacroEditorRequestCancel = Notification.Name(
+        "dev.macroknot.debug.editor-request-cancel"
+    )
+}
+
+/// 편집 창의 `취소 → 초안 삭제` 흐름을 실제 알림창 버튼 클릭까지 재현하고
+/// 창이 닫혔는지를 runtime.jsonl에 PASS/FAIL로 남기는 자동 시험.
+private struct MacroEditorCancelFlowFixture: View {
+    enum Scenario {
+        /// 변경 후 취소: 확인창을 거쳐 초안을 삭제하고 창이 닫혀야 한다.
+        case cancelWithChanges
+        /// 빈 초안 취소: 확인창 없이 즉시 창이 닫혀야 한다.
+        case cancelWithoutChanges
+        /// 내용 있는 초안을 닫았다 다시 연 뒤 취소: 세션 내 변경이 없어도
+        /// 확인창이 반드시 떠야 한다.
+        case cancelRecoveredDraft
+    }
+
+    let scenario: Scenario
+    @EnvironmentObject private var store: MacroLibraryStore
+    @Environment(\.openWindow) private var openWindow
+    @State private var didStart = false
+    @State private var alertClicked = false
+    @State private var statusText = "편집 창 취소 흐름 시험 준비"
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "hammer.circle")
+                .font(.system(size: 30, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+            Text(statusText)
+                .font(.headline)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear(perform: startOnce)
+    }
+
+    private var scenarioName: String {
+        switch scenario {
+        case .cancelWithChanges: return "cancel_with_changes"
+        case .cancelWithoutChanges: return "cancel_without_changes"
+        case .cancelRecoveredDraft: return "cancel_recovered_draft"
+        }
+    }
+
+    private var expectsAlert: Bool {
+        scenario != .cancelWithoutChanges
+    }
+
+    private func startOnce() {
+        guard !didStart else { return }
+        didStart = true
+        RuntimeEventLogger.record(
+            "editor_cancel_flow_started",
+            fields: ["scenario": scenarioName]
+        )
+
+        guard let draft = store.beginNewDraft() else {
+            finish(result: "FAIL", fields: ["stage": "begin_new_draft"])
+            return
+        }
+        statusText = "편집 창 여는 중"
+        openWindow(id: "macro-editor", value: draft.document.id)
+
+        after(1.2) {
+            logWindows(stage: "after_open")
+            if scenario != .cancelWithoutChanges {
+                statusText = "변경사항 생성"
+                NotificationCenter.default.post(
+                    name: .debugMacroEditorAppendWaitAction,
+                    object: nil
+                )
+            }
+        }
+
+        var cancelDelay = 1.6
+        if scenario == .cancelRecoveredDraft {
+            after(2.0) {
+                statusText = "초안 유지한 채 편집 창 닫기"
+                editorWindows().first?.close()
+            }
+            after(2.8) {
+                statusText = "초안 복구로 편집 창 다시 열기"
+                guard let recovered = store.beginNewDraft() else {
+                    finish(result: "FAIL", fields: ["stage": "reopen_recovered_draft"])
+                    return
+                }
+                openWindow(id: "macro-editor", value: recovered.document.id)
+            }
+            cancelDelay = 4.0
+        }
+
+        after(cancelDelay) {
+            statusText = "취소 요청"
+            NotificationCenter.default.post(name: .debugMacroEditorRequestCancel, object: nil)
+        }
+        after(cancelDelay + 1.0) {
+            guard expectsAlert else { return }
+            logWindows(stage: "alert_presented")
+            alertClicked = clickButton(titled: "초안 삭제")
+            statusText = alertClicked ? "초안 삭제 클릭됨" : "초안 삭제 버튼 못 찾음"
+            RuntimeEventLogger.record(
+                "editor_cancel_flow_alert_click",
+                result: alertClicked ? "PASS" : "FAIL",
+                fields: ["scenario": scenarioName]
+            )
+        }
+        after(cancelDelay + 2.4) {
+            logWindows(stage: "final")
+            let editorCount = editorWindows().count
+            let draftCleared = store.recoverableDraft == nil
+            let alertSatisfied = expectsAlert ? alertClicked : true
+            finish(
+                result: editorCount == 0 && draftCleared && alertSatisfied ? "PASS" : "FAIL",
+                fields: [
+                    "editor_window_count": String(editorCount),
+                    "draft_cleared": String(draftCleared),
+                    "alert_clicked": String(alertClicked),
+                ]
+            )
+        }
+    }
+
+    private func after(_ seconds: Double, _ work: @escaping @MainActor () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            work()
+        }
+    }
+
+    private func finish(result: String, fields: [String: String]) {
+        RuntimeEventLogger.record("editor_cancel_flow_result", result: result, fields: fields)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NSApplication.shared.terminate(nil)
+        }
+    }
+
+    private func editorWindows() -> [NSWindow] {
+        NSApplication.shared.windows.filter { window in
+            window.isVisible
+                && (window.identifier?.rawValue.contains("macro-editor") == true
+                    || window.title == "매크로 편집"
+                    || window.title == "새 매크로")
+        }
+    }
+
+    private func logWindows(stage: String) {
+        let summary = NSApplication.shared.windows
+            .map { window in
+                [
+                    String(describing: type(of: window)),
+                    "id=\(window.identifier?.rawValue ?? "-")",
+                    "title=\(window.title)",
+                    "visible=\(window.isVisible)",
+                    "sheet=\(window.attachedSheet != nil)",
+                ].joined(separator: ",")
+            }
+            .joined(separator: " | ")
+        RuntimeEventLogger.record(
+            "editor_cancel_flow_windows",
+            fields: ["stage": stage, "windows": summary]
+        )
+    }
+
+    private func clickButton(titled title: String) -> Bool {
+        var candidates = NSApplication.shared.windows
+        candidates.append(contentsOf: candidates.compactMap(\.attachedSheet))
+        for window in candidates {
+            if let button = findButton(titled: title, in: window.contentView) {
+                button.performClick(nil)
+                return true
+            }
+        }
+        return false
+    }
+
+    private func findButton(titled title: String, in view: NSView?) -> NSButton? {
+        guard let view else { return nil }
+        if let button = view as? NSButton, button.title == title {
+            return button
+        }
+        for subview in view.subviews {
+            if let found = findButton(titled: title, in: subview) {
+                return found
+            }
+        }
+        return nil
     }
 }
 #endif

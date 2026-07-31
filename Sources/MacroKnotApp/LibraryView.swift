@@ -3,6 +3,11 @@ import MacroKnotCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum DraftConflictIntent {
+    case edit(UUID)
+    case create
+}
+
 enum LibraryPlaybackPreviewState {
     case live
     case playing(iteration: Int)
@@ -25,7 +30,7 @@ struct LibraryView: View {
     @State private var isDeleteConfirmationPresented = false
     @State private var isDraftRecoveryPresented = false
     @State private var isDraftConflictPresented = false
-    @State private var pendingEditID: UUID?
+    @State private var draftConflictIntent: DraftConflictIntent?
     @State private var localErrorMessage: String?
     private let previewState: LibraryPlaybackPreviewState
 
@@ -82,16 +87,23 @@ struct LibraryView: View {
         .alert("다른 매크로의 초안이 있습니다", isPresented: $isDraftConflictPresented) {
             Button("기존 초안 계속 편집") {
                 openRecoverableDraft()
-                pendingEditID = nil
+                draftConflictIntent = nil
             }
-            Button("초안 삭제 후 편집", role: .destructive) {
-                replaceDraftAndEditPendingMacro()
+            Button(
+                isDraftConflictIntentCreate ? "초안 삭제 후 새로 만들기" : "초안 삭제 후 편집",
+                role: .destructive
+            ) {
+                replaceDraftAndOpenPendingEditor()
             }
             Button("취소", role: .cancel) {
-                pendingEditID = nil
+                draftConflictIntent = nil
             }
         } message: {
-            Text("선택한 매크로를 편집하려면 현재 저장되지 않은 초안을 먼저 삭제해야 합니다.")
+            Text(
+                isDraftConflictIntentCreate
+                    ? "새 매크로를 만들려면 현재 저장되지 않은 초안을 먼저 삭제해야 합니다."
+                    : "선택한 매크로를 편집하려면 현재 저장되지 않은 초안을 먼저 삭제해야 합니다."
+            )
         }
         .onAppear(perform: handleAppearance)
         .onDisappear {
@@ -155,47 +167,49 @@ struct LibraryView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(24)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 10) {
-                    ForEach(filteredRecords) { record in
-                            Button {
-                                store.selectedID = record.id
-                            } label: {
-                                LibraryRow(record: record)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(13)
-                                    .background(
-                                        store.selectedID == record.id
-                                            ? Color.accentColor.opacity(0.10)
-                                            : Color(nsColor: .controlBackgroundColor),
-                                        in: RoundedRectangle(cornerRadius: 12)
-                                    )
-                                    .overlay {
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .stroke(
-                                                store.selectedID == record.id
-                                                    ? Color.accentColor.opacity(0.28)
-                                                    : Color(nsColor: .separatorColor).opacity(0.45),
-                                                lineWidth: 1
-                                            )
-                                    }
-                            }
-                            .buttonStyle(.plain)
-                            .contextMenu {
-                                Button("편집", systemImage: "pencil") { edit(record.id) }
-                                Button("복제", systemImage: "plus.square.on.square") {
-                                    _ = store.duplicate(id: record.id)
-                                }
-                                Divider()
-                                Button("삭제", systemImage: "trash", role: .destructive) {
-                                    store.selectedID = record.id
-                                    isDeleteConfirmationPresented = true
-                                }
-                            }
+                List(selection: $store.selectedID) {
+                    ForEach(
+                        Array(filteredRecords.enumerated()),
+                        id: \.element.id
+                    ) { index, record in
+                        let insets = EdgeInsets(
+                            top: index == 0 ? 14 : 5,
+                            leading: 14,
+                            bottom: index == filteredRecords.count - 1 ? 14 : 5,
+                            trailing: 14
+                        )
+                        LibraryRow(record: record)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(13)
+                            .tag(record.id)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(insets)
+                            .listRowBackground(
+                                libraryRowCard(
+                                    isSelected: store.selectedID == record.id,
+                                    insets: insets
+                                )
+                            )
+                    }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .contextMenu(forSelectionType: UUID.self) { ids in
+                    if let id = ids.first {
+                        Button("편집", systemImage: "pencil") { edit(id) }
+                        Button("복제", systemImage: "plus.square.on.square") {
+                            _ = store.duplicate(id: id)
+                        }
+                        Divider()
+                        Button("삭제", systemImage: "trash", role: .destructive) {
+                            store.selectedID = id
+                            isDeleteConfirmationPresented = true
                         }
                     }
-                    .padding(14)
+                } primaryAction: { ids in
+                    if let id = ids.first { edit(id) }
                 }
+                .accessibilityLabel("저장된 매크로 목록")
             }
 
             Divider()
@@ -318,7 +332,6 @@ struct LibraryView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(record.document.actions.isEmpty || store.isRecording)
-                    .keyboardShortcut(.return, modifiers: [])
                 }
             }
 
@@ -575,16 +588,66 @@ struct LibraryView: View {
         )
     }
 
+    // macOS List의 자체 선택 강조는 listRowBackground 아래에 그려지므로
+    // 행 전체를 사이드바와 같은 재질로 덮은 뒤 그 위에 카드를 그려 가린다.
+    private func libraryRowCard(isSelected: Bool, insets: EdgeInsets) -> some View {
+        ZStack {
+            // 불투명층이 List의 네이티브 선택 강조를 차단하고,
+            // 그 위 material이 사이드바와 같은 색감을 유지한다.
+            Rectangle()
+                .fill(Color(nsColor: .windowBackgroundColor))
+            Rectangle()
+                .fill(.thinMaterial)
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.accentColor.opacity(0.10))
+                }
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(
+                        isSelected
+                            ? Color.accentColor.opacity(0.28)
+                            : Color(nsColor: .separatorColor).opacity(0.45),
+                        lineWidth: 1
+                    )
+            }
+            .padding(insets)
+        }
+    }
+
+    private var isDraftConflictIntentCreate: Bool {
+        if case .create = draftConflictIntent { return true }
+        return false
+    }
+
     private func createMacro() {
+        if let draft = store.recoverableDraft {
+            // 새 매크로 초안이 이미 있으면 그 편집 창을 그대로 연다.
+            if draft.mode == .create {
+                openWindow(id: "macro-editor", value: draft.document.id)
+                return
+            }
+            guard store.discardDraftIfNothingWouldBeLost() else {
+                draftConflictIntent = .create
+                isDraftConflictPresented = true
+                return
+            }
+            dismissWindow(id: "macro-editor", value: draft.document.id)
+        }
         guard let draft = store.beginNewDraft() else { return }
         openWindow(id: "macro-editor", value: draft.document.id)
     }
 
     private func edit(_ id: UUID) {
         if let draft = store.recoverableDraft, draft.document.id != id {
-            pendingEditID = id
-            isDraftConflictPresented = true
-            return
+            guard store.discardDraftIfNothingWouldBeLost() else {
+                draftConflictIntent = .edit(id)
+                isDraftConflictPresented = true
+                return
+            }
+            dismissWindow(id: "macro-editor", value: draft.document.id)
         }
         guard let draft = store.beginEditing(id: id) else {
             localErrorMessage = "선택한 매크로를 편집할 수 없습니다. 보관함을 새로고침해 주세요."
@@ -593,19 +656,26 @@ struct LibraryView: View {
         openWindow(id: "macro-editor", value: draft.document.id)
     }
 
-    private func replaceDraftAndEditPendingMacro() {
-        guard let id = pendingEditID else { return }
-        let oldDraftID = store.recoverableDraft?.document.id
-        if let oldDraftID {
+    private func replaceDraftAndOpenPendingEditor() {
+        let intent = draftConflictIntent
+        draftConflictIntent = nil
+        if let oldDraftID = store.recoverableDraft?.document.id {
             dismissWindow(id: "macro-editor", value: oldDraftID)
         }
         store.discardDraft()
-        pendingEditID = nil
-        guard let draft = store.beginEditing(id: id) else {
-            localErrorMessage = "선택한 매크로를 편집할 수 없습니다."
-            return
+        switch intent {
+        case .edit(let id):
+            guard let draft = store.beginEditing(id: id) else {
+                localErrorMessage = "선택한 매크로를 편집할 수 없습니다."
+                return
+            }
+            openWindow(id: "macro-editor", value: draft.document.id)
+        case .create:
+            guard let draft = store.beginNewDraft() else { return }
+            openWindow(id: "macro-editor", value: draft.document.id)
+        case nil:
+            break
         }
-        openWindow(id: "macro-editor", value: draft.document.id)
     }
 
     private func openRecoverableDraft() {
@@ -660,7 +730,12 @@ struct LibraryView: View {
 
     private func handleAppearance() {
         permissions.refresh()
-        isDraftRecoveryPresented = store.recoverableDraft != nil
+        // 편집 창이 열려 있으면 그 창이 초안을 쓰고 있으므로 건드리지 않는다.
+        if store.openEditorDraftID == nil {
+            isDraftRecoveryPresented = !store.discardDraftIfNothingWouldBeLost()
+        } else {
+            isDraftRecoveryPresented = false
+        }
         startGlobalCommandMonitor()
         DispatchQueue.main.async {
             NSApplication.shared.keyWindow?.makeFirstResponder(nil)
@@ -721,7 +796,7 @@ struct LibraryView: View {
 }
 
 struct MacroEditorWindowView: View {
-    @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: MacroLibraryStore
     @ObservedObject var permissions: PermissionState
     @State private var isClosing = false
@@ -743,6 +818,15 @@ struct MacroEditorWindowView: View {
                     },
                     onRecordingStateChanged: store.setRecording,
                     onDraftChanged: store.autosaveDraft,
+                    shouldConfirmCancel: { document in
+                        MacroEditorCancelPolicy.requiresConfirmation(
+                            mode: draft.mode,
+                            current: document,
+                            original: store.records
+                                .first { $0.id == draft.document.id }?
+                                .document
+                        )
+                    },
                     onSave: { document in
                         isClosing = true
                         do {
@@ -757,8 +841,7 @@ struct MacroEditorWindowView: View {
                         isClosing = true
                         store.discardDraft()
                         closeEditorWindow()
-                    },
-                    onClose: closeEditorWindow
+                    }
                 )
             )
             .navigationTitle(draft.mode == .create ? "새 매크로" : "매크로 편집")
@@ -771,15 +854,19 @@ struct MacroEditorWindowView: View {
                 description: Text("이 창을 닫고 보관함에서 다시 시작해 주세요.")
             )
             .frame(minWidth: 700, minHeight: 500)
+            .onAppear {
+                // 창 상태 복원으로 초안 없이 되살아난 편집 창은 스스로 닫는다.
+                closeEditorWindow()
+            }
         }
     }
 
     private func closeEditorWindow() {
         isClosing = true
+        // 취소 확인 알림창의 버튼 액션 안에서 동기적으로 창을 닫으면
+        // 알림창 해제와 같은 업데이트에 섞여 창 닫기가 무시되므로 한 틱 미룬다.
         DispatchQueue.main.async {
-            NSApplication.shared.windows
-                .first { $0.title == "새 매크로" || $0.title == "매크로 편집" }?
-                .close()
+            dismiss()
         }
     }
 }
@@ -824,9 +911,12 @@ private struct LibraryRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // 선택된 행은 List가 글자색을 흰색 강조로 바꾸는데, 배경은 커스텀
+            // 카드라서 명시적 라벨 색으로 고정해 선택과 무관하게 유지한다.
             Text(record.document.name)
                 .font(.callout.weight(.medium))
                 .lineLimit(1)
+                .foregroundStyle(Color(nsColor: .labelColor))
             HStack(spacing: 6) {
                 Text("액션 \(record.document.actions.count)개")
                 Text("·")
@@ -835,10 +925,10 @@ private struct LibraryRow: View {
                 ))
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color(nsColor: .secondaryLabelColor))
             Text(record.modifiedAt.formatted(date: .abbreviated, time: .shortened))
                 .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
         }
         .padding(.vertical, 5)
         .accessibilityElement(children: .combine)

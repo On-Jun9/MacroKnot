@@ -10,13 +10,33 @@ enum WorkspacePreviewState {
     case failed(String)
 }
 
-enum MacroEditorChangeDetection {
-    static func hasUnsavedChanges(
-        initial: MacroDocument?,
-        current: MacroDocument
+enum MacroEditorCancelPolicy {
+    /// 취소가 실제 내용을 잃게 할 때만 확인창을 띄운다.
+    /// 창을 연 시점이 아니라 초안의 종류를 기준으로 판단해,
+    /// 복구된 초안도 세션 내 변경 여부와 무관하게 보호한다.
+    static func requiresConfirmation(
+        mode: MacroDraftRecord.Mode,
+        current: MacroDocument,
+        original: MacroDocument?
     ) -> Bool {
-        guard let initial else { return true }
-        return current != initial
+        switch mode {
+        case .create:
+            return !current.actions.isEmpty || current.name != MacroDraftRecord.defaultName
+        case .edit:
+            guard let original else { return true }
+            return current.name != original.name || current.actions != original.actions
+        }
+    }
+}
+
+enum MacroEditorValidation {
+    static func saveBlockingReason(for document: MacroDocument) -> String? {
+        do {
+            try document.validate()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 }
 
@@ -26,9 +46,94 @@ struct MacroEditorConfiguration {
     let onRecordingRequestHandled: () -> Void
     let onRecordingStateChanged: (Bool) -> Void
     let onDraftChanged: (MacroDocument) -> Void
+    let shouldConfirmCancel: (MacroDocument) -> Bool
     let onSave: (MacroDocument) throws -> Void
     let onCancel: () -> Void
-    let onClose: () -> Void
+}
+
+/// 편집 창이 닫히기 전에 취소 확인을 거치도록 창 delegate에 전달 프록시를 끼운다.
+/// SwiftUI가 창 닫기 가로채기 API를 제공하지 않아 사용하는 우회로,
+/// 원래 delegate(SwiftUI 내부)가 모든 호출을 그대로 받도록 전부 전달하고
+/// `windowShouldClose` 판단 하나만 얹는다. 뷰가 창에서 빠지면 원래 delegate를 복원한다.
+private struct EditorWindowCloseConfirmation: NSViewRepresentable {
+    /// 닫아도 되면 true, 확인이 필요해 닫기를 보류하면 false를 돌려준다.
+    let shouldAllowClose: @MainActor () -> Bool
+
+    final class DelegateProxy: NSObject, NSWindowDelegate {
+        weak var original: NSWindowDelegate?
+        var shouldAllowClose: (@MainActor () -> Bool)?
+
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            let allowed = MainActor.assumeIsolated {
+                shouldAllowClose?() ?? true
+            }
+            guard allowed else { return false }
+            return original?.windowShouldClose?(sender) ?? true
+        }
+
+        override func responds(to aSelector: Selector!) -> Bool {
+            super.responds(to: aSelector) || (original?.responds(to: aSelector) ?? false)
+        }
+
+        override func forwardingTarget(for aSelector: Selector!) -> Any? {
+            if original?.responds(to: aSelector) == true {
+                return original
+            }
+            return super.forwardingTarget(for: aSelector)
+        }
+    }
+
+    final class Coordinator {
+        let proxy = DelegateProxy()
+        weak var window: NSWindow?
+
+        func install(on window: NSWindow) {
+            guard window.delegate !== proxy else { return }
+            self.window = window
+            proxy.original = window.delegate
+            window.delegate = proxy
+        }
+
+        func uninstall() {
+            guard let window, window.delegate === proxy else { return }
+            window.delegate = proxy.original
+            self.window = nil
+        }
+    }
+
+    final class AttachmentView: NSView {
+        var onWindowChanged: ((NSWindow?) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onWindowChanged?(window)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = AttachmentView()
+        context.coordinator.proxy.shouldAllowClose = shouldAllowClose
+        view.onWindowChanged = { [weak coordinator = context.coordinator] window in
+            if let window {
+                coordinator?.install(on: window)
+            } else {
+                coordinator?.uninstall()
+            }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.proxy.shouldAllowClose = shouldAllowClose
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
 }
 
 extension Notification.Name {
@@ -49,11 +154,11 @@ struct ContentView: View {
     @State private var isRepeatRangePresented = false
     @State private var isDeleteAllConfirmationPresented = false
     @State private var isCancelConfirmationPresented = false
+    @State private var didResolveEditor = false
     @State private var editorErrorMessage: String?
     @State private var autosaveTask: Task<Void, Never>?
     @State private var isSidebarPresented = true
     @FocusState private var isMacroNameFocused: Bool
-    @State private var initialDocumentSnapshot: MacroDocument?
     @AppStorage(AppPreferenceKeys.excludesEventsTargetingMacroKnot)
     private var excludesEventsTargetingMacroKnot = true
     @AppStorage(AppPreferenceKeys.recordingMode)
@@ -80,7 +185,6 @@ struct ContentView: View {
             wrappedValue: DocumentController(initialDocument: initialDocument)
         )
         _selectedActionIDs = State(initialValue: initialSelectedActionIDs)
-        _initialDocumentSnapshot = State(initialValue: initialDocument)
     }
 
     var body: some View {
@@ -109,6 +213,17 @@ struct ContentView: View {
             .toolbarBackground(.visible, for: .windowToolbar)
         }
         .frame(minWidth: 900, minHeight: 620)
+        .background {
+            if editorConfiguration != nil {
+                EditorWindowCloseConfirmation {
+                    // 저장·취소로 이미 처리됐으면 그대로 닫고,
+                    // 아니면 취소 흐름(필요 시 확인창)을 거친다.
+                    if didResolveEditor { return true }
+                    cancelEditor()
+                    return false
+                }
+            }
+        }
         .sheet(item: $actionEditorDraft) { draft in
             ActionEditorSheet(draft: draft) { action in
                 if documentController.document.actions.contains(where: { $0.id == action.id }) {
@@ -142,6 +257,7 @@ struct ContentView: View {
         }
         .alert("초안 편집을 취소할까요?", isPresented: $isCancelConfirmationPresented) {
             Button("초안 삭제", role: .destructive) {
+                didResolveEditor = true
                 editorConfiguration?.onCancel()
             }
             Button("계속 편집", role: .cancel) {}
@@ -171,6 +287,20 @@ struct ContentView: View {
         .onChange(of: recorder.isRecording) { _, isRecording in
             editorConfiguration?.onRecordingStateChanged(isRecording)
         }
+#if DEBUG
+        .onReceive(
+            NotificationCenter.default.publisher(for: .debugMacroEditorAppendWaitAction)
+        ) { _ in
+            guard editorConfiguration != nil else { return }
+            documentController.addWaitAction()
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .debugMacroEditorRequestCancel)
+        ) { _ in
+            guard editorConfiguration != nil else { return }
+            cancelEditor()
+        }
+#endif
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 permissions.refresh()
@@ -249,10 +379,10 @@ struct ContentView: View {
         VStack(spacing: 0) {
             workspaceHeader
             Divider()
-            activityBanner
             if editorConfiguration != nil {
                 editorActionWorkspace
             } else {
+                activityBanner
                 actionWorkspace
             }
             if editorConfiguration != nil {
@@ -274,13 +404,26 @@ struct ContentView: View {
                     .accessibilityLabel("매크로 이름")
 
                 HStack(spacing: 8) {
-                    Label(documentLocationText, systemImage: "doc.text")
-                    Text("·")
-                        .accessibilityHidden(true)
-                    Text("전체 화면 제어")
-                    Text("·")
-                        .accessibilityHidden(true)
-                    Text("예상 \(estimatedDurationText)")
+                    if editorConfiguration != nil {
+                        Label(
+                            "액션 \(documentController.document.actions.count)개",
+                            systemImage: "list.bullet"
+                        )
+                        Text("·")
+                            .accessibilityHidden(true)
+                        Text("예상 \(estimatedDurationText)")
+                        Text("·")
+                            .accessibilityHidden(true)
+                        Text("초안 자동 저장")
+                    } else {
+                        Label(documentLocationText, systemImage: "doc.text")
+                        Text("·")
+                            .accessibilityHidden(true)
+                        Text("전체 화면 제어")
+                        Text("·")
+                            .accessibilityHidden(true)
+                        Text("예상 \(estimatedDurationText)")
+                    }
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -289,9 +432,11 @@ struct ContentView: View {
 
             Spacer(minLength: 12)
 
-            StatusBadge(presentation: statusPresentation)
+            if editorConfiguration == nil {
+                StatusBadge(presentation: statusPresentation)
+            }
         }
-        .padding(.horizontal, 22)
+        .padding(.horizontal, editorConfiguration == nil ? 22 : 24)
         .padding(.vertical, 18)
     }
 
@@ -364,10 +509,103 @@ struct ContentView: View {
     }
 
     private var editorActionWorkspace: some View {
+        VStack(spacing: 14) {
+            recordingSetupCard
+            editorActionsCard
+        }
+        .frame(maxWidth: 920, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+    }
+
+    private var recordingSetupCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Text("녹화 설정")
+                    .font(.headline)
+                editorRecordingStatus
+                Spacer()
+
+                Button(action: { toggleRecording() }) {
+                    Label(
+                        isRecordingPresented ? "녹화 중지" : "녹화 시작",
+                        systemImage: isRecordingPresented ? "stop.fill" : "record.circle.fill"
+                    )
+                    .frame(minWidth: 84)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(isRecordingPresented ? .red : .accentColor)
+                .disabled(
+                    !isRecordingPresented
+                        && editorConfiguration?.isPlaybackRunning() == true
+                )
+                .help(
+                    isRecordingPresented
+                        ? "현재 녹화를 마칩니다"
+                        : "현재 설정으로 사용자 입력 녹화를 시작합니다"
+                )
+            }
+
+            EditorSettingRow(title: "마우스 기록") {
+                HStack(spacing: 3) {
+                    CompactChoiceButton(
+                        title: "주요 동작만",
+                        isSelected: recordingMode == .meaningfulActionsOnly
+                    ) {
+                        recordingModeRawValue = InputRecordingMode.meaningfulActionsOnly.rawValue
+                    }
+                    CompactChoiceButton(
+                        title: "모든 움직임",
+                        isSelected: recordingMode == .allMouseMovement
+                    ) {
+                        recordingModeRawValue = InputRecordingMode.allMouseMovement.rawValue
+                    }
+                }
+                .padding(3)
+                .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .disabled(isRecordingPresented)
+
+            EditorSettingRow(title: "창 입력") {
+                Toggle("MacroKnot 창 입력 제외", isOn: $excludesEventsTargetingMacroKnot)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .disabled(isRecordingPresented)
+
+            HStack(spacing: 7) {
+                Image(systemName: "keyboard")
+                Text("녹화 단축키: \(recordingShortcutTitle)")
+                Spacer()
+                if isRecordingPresented {
+                    Image(systemName: "record.circle.fill")
+                        .foregroundStyle(.red)
+                    Text("\(recordedActionsPresented.count)개 기록됨 · \(recordingLastEventPresented)")
+                        .lineLimit(1)
+                } else {
+                    Image(systemName: "arrow.forward.circle")
+                    Text("설정은 다음 녹화부터 적용됩니다")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .background(
+            Color(nsColor: .controlBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 12)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.primary.opacity(0.08))
+        }
+    }
+
+    private var editorActionsCard: some View {
         VStack(spacing: 0) {
-            actionToolbar
-            Divider()
-            recordingSettingsBar
+            editorActionToolbar
             Divider()
             actionContent
         }
@@ -380,8 +618,77 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.primary.opacity(0.08))
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 18)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var editorActionToolbar: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text("액션 편집")
+                        .font(.headline)
+                    Text(actionCountText)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Text(selectionDescription)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 12)
+
+            addActionMenu
+                .fixedSize()
+                .disabled(isRecordingPresented)
+
+            Button("선택 편집", systemImage: "slider.horizontal.3") {
+                editSelectedAction()
+            }
+            .disabled(selectedAction == nil || isRecordingPresented)
+            .help("선택한 액션 편집")
+
+            Menu {
+                Button(deleteSelectionTitle, systemImage: "trash", role: .destructive) {
+                    removeSelectedActions()
+                }
+                .disabled(selectedActionIDs.isEmpty || isRecordingPresented)
+
+                Button("범위를 반복으로 묶기…", systemImage: "repeat") {
+                    isRepeatRangePresented = true
+                }
+                .disabled(documentController.document.actions.isEmpty || isRecordingPresented)
+
+                Divider()
+
+                Button("모든 액션 삭제…", systemImage: "trash.slash", role: .destructive) {
+                    isDeleteAllConfirmationPresented = true
+                }
+                .disabled(documentController.document.actions.isEmpty || isRecordingPresented)
+            } label: {
+                Label("추가 작업", systemImage: "ellipsis.circle")
+            }
+            .labelStyle(.iconOnly)
+            .menuIndicator(.hidden)
+            .help("액션 추가 작업")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+    }
+
+    @ViewBuilder
+    private var editorRecordingStatus: some View {
+        if isRecordingPresented {
+            Label("녹화 중", systemImage: "record.circle.fill")
+                .foregroundStyle(.red)
+        } else if !permissions.accessibilityGranted {
+            Label("권한 필요", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        } else {
+            Label("녹화 준비", systemImage: "checkmark.circle")
+                .foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder
@@ -409,21 +716,6 @@ struct ContentView: View {
             }
 
             Spacer()
-
-            if editorConfiguration != nil {
-                Button(action: { toggleRecording() }) {
-                    Label(
-                        isRecordingPresented ? "녹화 중지" : "녹화 시작",
-                        systemImage: isRecordingPresented ? "stop.fill" : "record.circle.fill"
-                    )
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .fixedSize()
-                .disabled(!isRecordingPresented && editorConfiguration?.isPlaybackRunning() == true)
-                .help(isRecordingPresented ? "현재 녹화를 마칩니다" : "사용자 입력 녹화를 시작합니다")
-
-            }
 
             addActionMenu
                 .fixedSize()
@@ -459,51 +751,21 @@ struct ContentView: View {
             .menuIndicator(.hidden)
             .help("액션 추가 작업")
         }
-        .padding(.horizontal, 18)
+        .padding(.horizontal, 24)
         .padding(.vertical, 12)
-    }
-
-    private var recordingSettingsBar: some View {
-        HStack(spacing: 12) {
-            Text("마우스 기록")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 3) {
-                CompactChoiceButton(
-                    title: "주요 동작만",
-                    isSelected: recordingMode == .meaningfulActionsOnly
-                ) {
-                    recordingModeRawValue = InputRecordingMode.meaningfulActionsOnly.rawValue
-                }
-                CompactChoiceButton(
-                    title: "모든 움직임",
-                    isSelected: recordingMode == .allMouseMovement
-                ) {
-                    recordingModeRawValue = InputRecordingMode.allMouseMovement.rawValue
-                }
-            }
-            .padding(3)
-            .frame(width: 230)
-            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
-
-            Spacer()
-
-            Toggle("MacroKnot 창 입력 제외", isOn: $excludesEventsTargetingMacroKnot)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-        }
-        .disabled(isRecordingPresented)
-        .padding(.horizontal, 18)
-        .padding(.vertical, 9)
-        .background(Color.primary.opacity(0.025))
     }
 
     private var editorFooter: some View {
         HStack(spacing: 10) {
-            Text("편집 내용은 임시 초안으로 자동 저장됩니다.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if let editorSaveBlockingReason {
+                Label(editorSaveBlockingReason, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            } else {
+                Label("편집 내용은 임시 초안으로 자동 저장됩니다.", systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             Button("취소") {
                 cancelEditor()
@@ -512,10 +774,10 @@ struct ContentView: View {
                 Label("보관함에 저장", systemImage: "checkmark")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(isRecordingPresented)
+            .disabled(isRecordingPresented || editorSaveBlockingReason != nil)
             .keyboardShortcut("s", modifiers: .command)
         }
-        .padding(.horizontal, 18)
+        .padding(.horizontal, 24)
         .padding(.vertical, 12)
         .background(.bar)
     }
@@ -554,38 +816,36 @@ struct ContentView: View {
     }
 
     private var emptyActionView: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             ZStack {
                 Circle()
                     .fill(Color.accentColor.opacity(0.10))
-                    .frame(width: 72, height: 72)
+                    .frame(width: 56, height: 56)
                 Image(systemName: "list.bullet.rectangle")
-                    .font(.system(size: 30, weight: .medium))
+                    .font(.system(size: 23, weight: .medium))
                     .foregroundStyle(Color.accentColor)
             }
 
             VStack(spacing: 6) {
                 Text("첫 액션을 만들어 보세요")
                     .font(.title3.weight(.semibold))
-                Text("평소처럼 작업을 녹화하거나 필요한 액션을 직접 추가할 수 있습니다.")
+                Text(
+                    editorConfiguration == nil
+                        ? "평소처럼 작업을 녹화하거나 필요한 액션을 직접 추가할 수 있습니다."
+                        : "위의 녹화 설정에서 시작하거나 필요한 액션을 직접 추가할 수 있습니다."
+                )
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
 
-            HStack(spacing: 10) {
+            if editorConfiguration == nil {
                 Button(action: { toggleRecording() }) {
                     Label("녹화 시작", systemImage: "record.circle.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .disabled(displayedPlayerState == .running)
-
-                addActionMenu
             }
-
-            Text("녹화 단축키: \(recordingShortcutTitle)")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(32)
@@ -600,24 +860,32 @@ struct ContentView: View {
                 } else {
                     ActionRow(item: item)
                         .tag(item.action.id)
-                        .contextMenu {
-                            Button("편집", systemImage: "slider.horizontal.3") {
-                                selectedActionIDs = [item.action.id]
-                                actionEditorDraft = ActionEditorDraft(action: item.action)
-                            }
-                            .disabled(isRecordingPresented)
-                            Divider()
-                            Button(contextDeleteTitle(for: item.action.id), systemImage: "trash", role: .destructive) {
-                                let ids = selectedActionIDs.contains(item.action.id)
-                                    ? selectedActionIDs
-                                    : [item.action.id]
-                                documentController.removeActions(ids: ids)
-                                selectedActionIDs.subtract(ids)
-                            }
-                            .disabled(isRecordingPresented)
-                        }
                 }
             }
+            .onMove(perform: isRecordingPresented ? nil : moveActions)
+        }
+        .contextMenu(forSelectionType: UUID.self) { ids in
+            if !ids.isEmpty {
+                Button("편집", systemImage: "slider.horizontal.3") {
+                    selectedActionIDs = ids
+                    editSelectedAction()
+                }
+                .disabled(ids.count != 1 || isRecordingPresented)
+                Divider()
+                Button(
+                    ids.count > 1 ? "선택한 액션 \(ids.count)개 삭제" : "삭제",
+                    systemImage: "trash",
+                    role: .destructive
+                ) {
+                    documentController.removeActions(ids: ids)
+                    selectedActionIDs.subtract(ids)
+                }
+                .disabled(isRecordingPresented)
+            }
+        } primaryAction: { ids in
+            guard !isRecordingPresented, ids.count == 1 else { return }
+            selectedActionIDs = ids
+            editSelectedAction()
         }
         .listStyle(.inset)
         .scrollContentBackground(.hidden)
@@ -854,6 +1122,11 @@ struct ContentView: View {
             && !permissions.screenCaptureGranted
     }
 
+    private var editorSaveBlockingReason: String? {
+        guard editorConfiguration != nil else { return nil }
+        return MacroEditorValidation.saveBlockingReason(for: documentController.document)
+    }
+
     private var actionCountText: String {
         guard isRecordingPresented else {
             return "\(documentController.document.actions.count)개"
@@ -875,24 +1148,20 @@ struct ContentView: View {
             return "새 액션이 목록에 실시간으로 추가됩니다"
         }
         if selectedActionIDs.count > 1 {
-            return "\(selectedActionIDs.count)개 액션 선택됨 · Command/Shift로 선택 조정"
+            return "\(selectedActionIDs.count)개 선택 · Delete 삭제 · 드래그로 순서 변경"
         }
         guard let selectedActionIndex, let selectedAction else {
-            return displayedActions.isEmpty ? "녹화하거나 직접 추가할 수 있습니다" : "액션을 선택하면 편집할 수 있습니다"
+            return displayedActions.isEmpty
+                ? "녹화하거나 직접 추가할 수 있습니다"
+                : "선택 후 Return 편집 · Delete 삭제 · 드래그로 순서 변경"
         }
-        return "\(selectedActionIndex + 1)번 · \(selectedAction.displayName) 선택됨"
+        return "\(selectedActionIndex + 1)번 · \(selectedAction.displayName) · Return 편집 · Delete 삭제"
     }
 
     private var deleteSelectionTitle: String {
         selectedActionIDs.count > 1
             ? "선택한 액션 \(selectedActionIDs.count)개 삭제"
             : "선택한 액션 삭제"
-    }
-
-    private func contextDeleteTitle(for id: UUID) -> String {
-        selectedActionIDs.contains(id) && selectedActionIDs.count > 1
-            ? "선택한 액션 \(selectedActionIDs.count)개 삭제"
-            : "삭제"
     }
 
     private var documentLocationText: String {
@@ -907,7 +1176,7 @@ struct ContentView: View {
                 importMacro: nil,
                 saveMacro: saveEditor,
                 exportMacro: nil,
-                closeWindow: editorConfiguration?.onClose
+                closeWindow: { cancelEditor() }
             )
         }
         return MacroCommands(
@@ -979,6 +1248,7 @@ struct ContentView: View {
             autosaveTask?.cancel()
             try documentController.document.validate()
             try editorConfiguration.onSave(documentController.document)
+            didResolveEditor = true
             editorErrorMessage = nil
         } catch {
             editorErrorMessage = error.localizedDescription
@@ -1016,17 +1286,20 @@ struct ContentView: View {
         selectedActionIDs.removeAll()
     }
 
-    private var hasUnsavedChanges: Bool {
-        MacroEditorChangeDetection.hasUnsavedChanges(
-            initial: initialDocumentSnapshot,
-            current: documentController.document
-        )
+    private func moveActions(fromOffsets: IndexSet, toOffset: Int) {
+        documentController.moveActions(fromOffsets: fromOffsets, toOffset: toOffset)
     }
 
     private func cancelEditor() {
-        if hasUnsavedChanges {
+        // 녹화 중이던 입력을 먼저 문서에 반영해야
+        // 취소 정책이 잃을 내용으로 집계할 수 있다.
+        if recorder.isRecording {
+            toggleRecording()
+        }
+        if editorConfiguration?.shouldConfirmCancel(documentController.document) == true {
             isCancelConfirmationPresented = true
         } else {
+            didResolveEditor = true
             editorConfiguration?.onCancel()
         }
     }
@@ -1095,6 +1368,27 @@ private struct DisplayedAction {
     let action: MacroAction
     let isLive: Bool
     let position: Int
+}
+
+private struct EditorSettingRow<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 68, alignment: .leading)
+            content
+                .frame(maxWidth: .infinity)
+        }
+    }
 }
 
 private struct ActionRow: View {
