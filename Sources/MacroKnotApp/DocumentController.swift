@@ -147,6 +147,25 @@ final class DocumentController: ObservableObject {
         )
     }
 
+    func removeActions(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        if ids.count == 1, let id = ids.first {
+            removeAction(id: id)
+            return
+        }
+        let removedActions = document.actions.filter { ids.contains($0.id) }
+        guard !removedActions.isEmpty else { return }
+        document.actions.removeAll { ids.contains($0.id) }
+        RuntimeEventLogger.record(
+            "actions_removed",
+            result: "PASS",
+            fields: [
+                "action_count": String(removedActions.count),
+                "kinds": removedActions.map { $0.kind.rawValue }.joined(separator: ","),
+            ]
+        )
+    }
+
     func removeAllActions() {
         guard !document.actions.isEmpty else { return }
         let removedCount = document.actions.count
@@ -168,6 +187,31 @@ final class DocumentController: ObservableObject {
             "action_moved",
             result: "PASS",
             fields: ["from": String(source + 1), "to": String(destination + 1)]
+        )
+    }
+
+    func moveActions(fromOffsets: IndexSet, toOffset: Int) {
+        let validOffsets = fromOffsets.filter { document.actions.indices.contains($0) }
+        guard !validOffsets.isEmpty,
+              (0...document.actions.count).contains(toOffset) else { return }
+
+        let movedActions = validOffsets.map { document.actions[$0] }
+        for index in validOffsets.reversed() {
+            document.actions.remove(at: index)
+        }
+        let removedBeforeDestination = validOffsets.count { $0 < toOffset }
+        let insertionIndex = min(
+            max(toOffset - removedBeforeDestination, 0),
+            document.actions.endIndex
+        )
+        document.actions.insert(contentsOf: movedActions, at: insertionIndex)
+        RuntimeEventLogger.record(
+            "actions_reordered",
+            result: "PASS",
+            fields: [
+                "action_count": String(movedActions.count),
+                "destination": String(insertionIndex + 1),
+            ]
         )
     }
 

@@ -123,6 +123,127 @@ func removesAllActionsFromCurrentDocument() {
     #expect(controller.document.actions.isEmpty)
 }
 
+@MainActor
+@Test
+func removesMultipleSelectedActionsTogether() {
+    let controller = DocumentController()
+    let first = MacroAction.wait(milliseconds: 100)
+    let second = MacroAction.keyboard(keyCode: 0, characters: "a", modifierFlags: 0)
+    let third = MacroAction.wait(milliseconds: 200)
+    controller.document.actions = [first, second, third]
+
+    controller.removeActions(ids: [first.id, third.id])
+
+    #expect(controller.document.actions.map(\.id) == [second.id])
+}
+
+@MainActor
+@Test
+func reordersMultipleActionsByDraggingTheirRows() {
+    let controller = DocumentController()
+    let first = MacroAction.wait(milliseconds: 100)
+    let second = MacroAction.wait(milliseconds: 200)
+    let third = MacroAction.wait(milliseconds: 300)
+    let fourth = MacroAction.wait(milliseconds: 400)
+    controller.document.actions = [first, second, third, fourth]
+
+    controller.moveActions(fromOffsets: IndexSet([0, 1]), toOffset: 4)
+
+    #expect(controller.document.actions.map(\.id) == [third.id, fourth.id, first.id, second.id])
+
+    controller.moveActions(fromOffsets: IndexSet([2, 3]), toOffset: 0)
+
+    #expect(controller.document.actions.map(\.id) == [first.id, second.id, third.id, fourth.id])
+}
+
+@Test
+func requiresCancelConfirmationOnlyWhenContentWouldBeLost() {
+    let pristine = MacroDocument(name: MacroDraftRecord.defaultName)
+
+    #expect(
+        !MacroEditorCancelPolicy.requiresConfirmation(
+            mode: .create,
+            current: pristine,
+            original: nil
+        )
+    )
+
+    var renamed = pristine
+    renamed.name = "변경한 매크로"
+    #expect(
+        MacroEditorCancelPolicy.requiresConfirmation(
+            mode: .create,
+            current: renamed,
+            original: nil
+        )
+    )
+
+    var actionAdded = pristine
+    actionAdded.actions.append(.wait(milliseconds: 100))
+    #expect(
+        MacroEditorCancelPolicy.requiresConfirmation(
+            mode: .create,
+            current: actionAdded,
+            original: nil
+        )
+    )
+}
+
+@Test
+func requiresCancelConfirmationForRecoveredCreateDraftWithoutSessionChanges() {
+    var recovered = MacroDocument(name: MacroDraftRecord.defaultName)
+    recovered.actions.append(.wait(milliseconds: 100))
+
+    #expect(
+        MacroEditorCancelPolicy.requiresConfirmation(
+            mode: .create,
+            current: recovered,
+            original: nil
+        )
+    )
+}
+
+@Test
+func requiresCancelConfirmationForEditDraftOnlyWhenDifferentFromLibraryOriginal() {
+    var original = MacroDocument(name: "업무 자동화")
+    original.actions.append(.wait(milliseconds: 100))
+
+    #expect(
+        !MacroEditorCancelPolicy.requiresConfirmation(
+            mode: .edit,
+            current: original,
+            original: original
+        )
+    )
+
+    var changed = original
+    changed.actions.append(.wait(milliseconds: 200))
+    #expect(
+        MacroEditorCancelPolicy.requiresConfirmation(
+            mode: .edit,
+            current: changed,
+            original: original
+        )
+    )
+
+    #expect(
+        MacroEditorCancelPolicy.requiresConfirmation(
+            mode: .edit,
+            current: original,
+            original: nil
+        )
+    )
+}
+
+@Test
+func exposesMacroEditorSaveBlockingReasonBeforeSubmission() {
+    var document = MacroDocument(name: "   ")
+    #expect(MacroEditorValidation.saveBlockingReason(for: document) != nil)
+
+    document.name = "업무 자동화"
+    #expect(MacroEditorValidation.saveBlockingReason(for: document) == nil)
+}
+
 @Test
 func rejectsInvalidEditorValues() {
     var draft = ActionEditorDraft(kind: .drag)
@@ -161,6 +282,65 @@ func preventsDuplicatePlaybackAndReleasesInputsWhenStopped() async {
     }
 
     #expect(player.state == .stopped)
+    #expect(await performer.releaseCount == 1)
+    #expect(stopMonitor.stopCount == 1)
+}
+
+@MainActor
+@Test
+func repeatsPlaybackForRequestedFiniteCount() async {
+    let stopMonitor = FakeStopMonitor()
+    let performer = CountingInputPerformer()
+    let player = InputPlayer(
+        globalStopMonitor: stopMonitor,
+        performerFactory: { performer }
+    )
+    let document = MacroDocument(
+        name: "3회 재생",
+        actions: [.keyboard(keyCode: 0, characters: "a", modifierFlags: 0)]
+    )
+
+    player.play(
+        document: document,
+        options: PlaybackOptions(rate: 2, repetition: .finite(3))
+    )
+    for _ in 0..<200 where player.state == .running {
+        await Task.yield()
+    }
+
+    #expect(player.state == .completed)
+    #expect(await performer.performCount == 3)
+    #expect(await performer.releaseCount == 1)
+    #expect(stopMonitor.startCount == 1)
+    #expect(stopMonitor.stopCount == 1)
+}
+
+@MainActor
+@Test
+func stopsInfinitePlaybackAndReleasesInputs() async {
+    let stopMonitor = FakeStopMonitor()
+    let performer = CountingInputPerformer(suspendsAfterCount: 3)
+    let player = InputPlayer(
+        globalStopMonitor: stopMonitor,
+        performerFactory: { performer }
+    )
+    let document = MacroDocument(
+        name: "무한 재생",
+        actions: [.keyboard(keyCode: 0, characters: "a", modifierFlags: 0)]
+    )
+
+    player.play(
+        document: document,
+        options: PlaybackOptions(rate: 1, repetition: .infinite)
+    )
+    await performer.waitUntilSuspended()
+    player.stop()
+    for _ in 0..<200 where await performer.releaseCount == 0 {
+        await Task.yield()
+    }
+
+    #expect(player.state == .stopped)
+    #expect(await performer.performCount == 3)
     #expect(await performer.releaseCount == 1)
     #expect(stopMonitor.stopCount == 1)
 }
@@ -342,6 +522,34 @@ private actor WorkflowRecordingPerformer: MacroActionPerforming {
 
     func perform(_ action: MacroAction) {
         kinds.append(action.kind)
+    }
+}
+
+private actor CountingInputPerformer: InputReleasingActionPerformer {
+    private(set) var performCount = 0
+    private(set) var releaseCount = 0
+    private let suspendsAfterCount: Int?
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(suspendsAfterCount: Int? = nil) {
+        self.suspendsAfterCount = suspendsAfterCount
+    }
+
+    func perform(_ action: MacroAction) async throws {
+        performCount += 1
+        guard performCount == suspendsAfterCount else { return }
+        continuation?.resume()
+        continuation = nil
+        try await Task.sleep(for: .seconds(60))
+    }
+
+    func releaseAllInputs() {
+        releaseCount += 1
+    }
+
+    func waitUntilSuspended() async {
+        if performCount == suspendsAfterCount { return }
+        await withCheckedContinuation { continuation = $0 }
     }
 }
 

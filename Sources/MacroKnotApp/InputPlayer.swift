@@ -37,6 +37,7 @@ final class InputPlayer: ObservableObject {
     }
 
     @Published private(set) var state = State.idle
+    @Published private(set) var currentIteration = 0
     private var task: Task<Void, Never>?
     private var performer: (any InputReleasingActionPerformer)?
     private let globalStopMonitor: any GlobalStopMonitoring
@@ -52,9 +53,10 @@ final class InputPlayer: ObservableObject {
         self.performerFactory = performerFactory
     }
 
-    func play(document: MacroDocument) {
+    func play(document: MacroDocument, options: PlaybackOptions = .default) {
         guard task == nil, !document.actions.isEmpty else { return }
         do {
+            try options.validate()
             try document.validateForPlayback(
                 currentDisplayConfiguration: DisplayConfigurationProvider.current()
             )
@@ -67,11 +69,21 @@ final class InputPlayer: ObservableObject {
             )
             return
         }
-        let actions = document.actions
+        let actions: [MacroAction]
+        do {
+            actions = try document.actions.map { try $0.scalingTiming(for: options.rate) }
+        } catch {
+            state = .failed(error.localizedDescription)
+            return
+        }
         RuntimeEventLogger.record(
             "playback_preflight",
             result: "PASS",
-            fields: ["action_count": String(actions.count)]
+            fields: [
+                "action_count": String(actions.count),
+                "rate": String(options.rate),
+                "repetition": options.repetition.logValue,
+            ]
         )
         do {
             try globalStopMonitor.start { [weak self] in
@@ -87,17 +99,28 @@ final class InputPlayer: ObservableObject {
             return
         }
         state = .running
+        currentIteration = 1
         RuntimeEventLogger.record(
             "playback_started",
             result: "PASS",
-            fields: ["action_count": String(actions.count)]
+            fields: [
+                "action_count": String(actions.count),
+                "rate": String(options.rate),
+                "repetition": options.repetition.logValue,
+            ]
         )
         let performer = performerFactory()
         self.performer = performer
         let engine = MacroExecutionEngine(performer: performer)
         task = Task { [weak self] in
             do {
-                try await engine.run(actions)
+                var iteration = 0
+                while options.repetition.shouldRun(iteration: iteration) {
+                    try Task.checkCancellation()
+                    self?.currentIteration = iteration + 1
+                    try await engine.run(actions)
+                    iteration += 1
+                }
                 await performer.releaseAllInputs()
                 guard !Task.isCancelled else {
                     self?.finish(.stopped)
@@ -124,6 +147,9 @@ final class InputPlayer: ObservableObject {
 
     private func finish(_ state: State) {
         self.state = state
+        if state != .running {
+            currentIteration = 0
+        }
         task = nil
         performer = nil
         RuntimeEventLogger.record(
@@ -145,6 +171,22 @@ final class InputPlayer: ObservableObject {
         task?.cancel()
         if task != nil {
             state = .stopped
+        }
+    }
+}
+
+private extension PlaybackOptions.Repetition {
+    func shouldRun(iteration: Int) -> Bool {
+        switch self {
+        case .finite(let count): return iteration < count
+        case .infinite: return true
+        }
+    }
+
+    var logValue: String {
+        switch self {
+        case .finite(let count): return String(count)
+        case .infinite: return "infinite"
         }
     }
 }
