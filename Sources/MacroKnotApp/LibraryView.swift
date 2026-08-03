@@ -168,10 +168,6 @@ struct LibraryView: View {
                         .foregroundStyle(.tertiary)
                     Text(searchText.isEmpty ? "저장된 매크로가 없습니다" : "검색 결과가 없습니다")
                         .font(.callout.weight(.medium))
-                    if searchText.isEmpty {
-                        Button("첫 매크로 만들기", action: createMacro)
-                            .buttonStyle(.link)
-                    }
                 }
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -337,7 +333,7 @@ struct LibraryView: View {
                     .keyboardShortcut(.escape, modifiers: .control)
                 } else {
                     Button(action: { startPlayback(record.document) }) {
-                        Label("실행 시작", systemImage: "play.fill")
+                        Label(playbackStartButtonTitle, systemImage: "play.fill")
                             .frame(minWidth: 84)
                     }
                     .buttonStyle(.borderedProminent)
@@ -609,6 +605,13 @@ struct LibraryView: View {
 
     private var isPlaybackRunning: Bool {
         displayedPlayerState == .running
+    }
+
+    private var playbackStartButtonTitle: String {
+        if case .failed = displayedPlayerState {
+            return "다시 확인 후 실행"
+        }
+        return "실행 시작"
     }
 
     private var displayedIteration: Int {

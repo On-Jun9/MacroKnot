@@ -20,6 +20,8 @@ struct DebugUISnapshotRoot: View {
             records = []
         case .mouseHeavy:
             records = Self.mouseHeavyRecords
+        case .layoutStress:
+            records = Self.layoutStressRecords
         default:
             records = Self.previewRecords
         }
@@ -68,6 +70,10 @@ struct DebugUISnapshotRoot: View {
         case .mouseHeavy:
             LibraryView(permissions: permissions)
                 .environmentObject(libraryStore)
+        case .layoutStress:
+            LibraryView(permissions: permissions)
+                .environmentObject(libraryStore)
+                .dynamicTypeSize(.accessibility1)
         case .playing:
             LibraryView(
                 permissions: permissions,
@@ -258,6 +264,30 @@ struct DebugUISnapshotRoot: View {
         return [MacroLibraryRecord(document: document, createdAt: date, modifiedAt: date)]
     }
 
+    private static var layoutStressRecords: [MacroLibraryRecord] {
+        let documents = [
+            MacroDocument(
+                name: "분기별 고객 지원 현황과 정산 자료를 취합하고 보고서 화면을 캡처하는 매우 긴 자동화",
+                actions: sampleActions,
+                displayConfiguration: DisplayConfigurationProvider.current()
+            ),
+            MacroDocument(
+                name: "Internationalized quarterly reconciliation and reporting workflow",
+                actions: Array(sampleActions.prefix(6)),
+                displayConfiguration: DisplayConfigurationProvider.current()
+            ),
+            MacroDocument(
+                name: "고객 문의 화면 캡처 및 담당 부서 전달",
+                actions: Array(sampleActions.suffix(5)),
+                displayConfiguration: DisplayConfigurationProvider.current()
+            ),
+        ]
+        return documents.enumerated().map { index, document in
+            let date = Date(timeIntervalSince1970: 1_785_346_800 - Double(index * 86_400))
+            return MacroLibraryRecord(document: document, createdAt: date, modifiedAt: date)
+        }
+    }
+
     private static var editorDraft: ActionEditorDraft {
         var draft = ActionEditorDraft(kind: .drag)
         draft.startX = "128"
@@ -351,6 +381,7 @@ private struct UISnapshotConfiguration {
         case playing
         case playbackOptions = "playback-options"
         case mouseHeavy = "mouse-heavy"
+        case layoutStress = "layout-stress"
         case error
         case editor
         case macroEditor = "macro-editor"
