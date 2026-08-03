@@ -38,6 +38,8 @@ final class InputPlayer: ObservableObject {
 
     @Published private(set) var state = State.idle
     @Published private(set) var currentIteration = 0
+    @Published private(set) var currentActionIndex = 0
+    @Published private(set) var totalActionCount = 0
     @Published private(set) var activeOptions: PlaybackOptions?
     private var task: Task<Void, Never>?
     private var performer: (any InputReleasingActionPerformer)?
@@ -101,6 +103,8 @@ final class InputPlayer: ObservableObject {
         }
         state = .running
         currentIteration = 1
+        currentActionIndex = 1
+        totalActionCount = actions.count
         activeOptions = options
         RuntimeEventLogger.record(
             "playback_started",
@@ -120,7 +124,12 @@ final class InputPlayer: ObservableObject {
                 while options.repetition.shouldRun(iteration: iteration) {
                     try Task.checkCancellation()
                     self?.currentIteration = iteration + 1
-                    try await engine.run(actions)
+                    self?.currentActionIndex = 1
+                    try await engine.run(actions) { [weak self] actionIndex in
+                        await MainActor.run {
+                            self?.currentActionIndex = actionIndex
+                        }
+                    }
                     iteration += 1
                 }
                 await performer.releaseAllInputs()
@@ -151,6 +160,8 @@ final class InputPlayer: ObservableObject {
         self.state = state
         if state != .running {
             currentIteration = 0
+            currentActionIndex = 0
+            totalActionCount = 0
             activeOptions = nil
         }
         task = nil

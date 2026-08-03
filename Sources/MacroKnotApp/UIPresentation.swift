@@ -169,7 +169,19 @@ enum MacroDurationFormatter {
 }
 
 enum PlaybackProgressPresentation {
-    static func statusText(
+    static func iterationValue(
+        iteration: Int,
+        repetition: PlaybackOptions.Repetition
+    ) -> String {
+        switch repetition {
+        case .finite(let count):
+            return "\(iteration)/\(count)"
+        case .infinite:
+            return "\(iteration)/∞"
+        }
+    }
+
+    static func iterationText(
         iteration: Int,
         repetition: PlaybackOptions.Repetition
     ) -> String {
@@ -179,6 +191,29 @@ enum PlaybackProgressPresentation {
         case .infinite:
             return "반복 \(iteration) · 무한 반복"
         }
+    }
+
+    static func actionValue(actionIndex: Int?, actionCount: Int?) -> String? {
+        guard let actionIndex, let actionCount, actionIndex > 0, actionCount > 0 else {
+            return nil
+        }
+        return "\(actionIndex)/\(actionCount)"
+    }
+
+    static func statusText(
+        iteration: Int,
+        repetition: PlaybackOptions.Repetition,
+        actionIndex: Int? = nil,
+        actionCount: Int? = nil
+    ) -> String {
+        let iterationText = iterationText(iteration: iteration, repetition: repetition)
+        guard let actionValue = actionValue(
+            actionIndex: actionIndex,
+            actionCount: actionCount
+        ) else {
+            return iterationText
+        }
+        return "\(iterationText) · 액션 \(actionValue)"
     }
 }
 

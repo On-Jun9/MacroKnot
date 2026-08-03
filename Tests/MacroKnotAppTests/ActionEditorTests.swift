@@ -267,6 +267,7 @@ func preventsDuplicatePlaybackAndReleasesInputsWhenStopped() async {
         name: "재생 상태",
         actions: [
             .keyboard(keyCode: 0, characters: "a", modifierFlags: 0),
+            .wait(milliseconds: 100),
         ]
     )
     let options = PlaybackOptions(rate: 1.5, repetition: .finite(3))
@@ -276,6 +277,8 @@ func preventsDuplicatePlaybackAndReleasesInputsWhenStopped() async {
 
     #expect(player.state == .running)
     #expect(player.activeOptions == options)
+    #expect(player.currentActionIndex == 1)
+    #expect(player.totalActionCount == 2)
     #expect(stopMonitor.startCount == 1)
     await performer.waitUntilStarted()
     player.stop()
@@ -285,8 +288,43 @@ func preventsDuplicatePlaybackAndReleasesInputsWhenStopped() async {
 
     #expect(player.state == .stopped)
     #expect(player.activeOptions == nil)
+    #expect(player.currentActionIndex == 0)
+    #expect(player.totalActionCount == 0)
     #expect(await performer.releaseCount == 1)
     #expect(stopMonitor.stopCount == 1)
+}
+
+@MainActor
+@Test
+func reportsCurrentTopLevelActionDuringPlayback() async {
+    let stopMonitor = FakeStopMonitor()
+    let performer = CountingInputPerformer(suspendsAfterCount: 2)
+    let player = InputPlayer(
+        globalStopMonitor: stopMonitor,
+        performerFactory: { performer }
+    )
+    let document = MacroDocument(
+        name: "액션 진행 상태",
+        actions: [
+            .keyboard(keyCode: 0, characters: "a", modifierFlags: 0),
+            .keyboard(keyCode: 11, characters: "b", modifierFlags: 0),
+        ]
+    )
+
+    player.play(document: document)
+    await performer.waitUntilSuspended()
+
+    #expect(player.state == .running)
+    #expect(player.currentActionIndex == 2)
+    #expect(player.totalActionCount == 2)
+
+    player.stop()
+    for _ in 0..<200 where await performer.releaseCount == 0 {
+        await Task.yield()
+    }
+    #expect(player.state == .stopped)
+    #expect(player.currentActionIndex == 0)
+    #expect(player.totalActionCount == 0)
 }
 
 @MainActor

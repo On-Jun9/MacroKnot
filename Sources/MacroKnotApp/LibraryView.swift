@@ -10,7 +10,7 @@ private enum DraftConflictIntent {
 
 enum LibraryPlaybackPreviewState {
     case live
-    case playing(iteration: Int, repeatCount: Int)
+    case playing(iteration: Int, repeatCount: Int, actionIndex: Int, actionCount: Int)
     case failed(String)
     case configured(rate: Double, repeatCount: Int)
 }
@@ -45,7 +45,7 @@ struct LibraryView: View {
             _playbackRate = State(initialValue: rate)
             _repetitionMode = State(initialValue: .finite)
             _repeatCount = State(initialValue: max(2, repeatCount))
-        case .playing(_, let repeatCount):
+        case .playing(_, let repeatCount, _, _):
             _repetitionMode = State(initialValue: .finite)
             _repeatCount = State(initialValue: max(2, repeatCount))
         case .live, .failed:
@@ -546,14 +546,29 @@ struct LibraryView: View {
     private var playbackStatus: some View {
         switch displayedPlayerState {
         case .running:
-            Label(
-                PlaybackProgressPresentation.statusText(
+            HStack(spacing: 5) {
+                Label("실행 중", systemImage: "play.circle.fill")
+                    .foregroundStyle(.indigo)
+                PlaybackProgressChip(
+                    title: "반복",
+                    value: PlaybackProgressPresentation.iterationValue(
+                        iteration: displayedIteration,
+                        repetition: displayedRepetition
+                    )
+                )
+                if let actionValue = PlaybackProgressPresentation.actionValue(
+                    actionIndex: displayedActionIndex,
+                    actionCount: displayedActionCount
+                ) {
+                    PlaybackProgressChip(title: "액션", value: actionValue)
+                }
+            }
+                .accessibilityLabel(PlaybackProgressPresentation.statusText(
                     iteration: displayedIteration,
-                    repetition: displayedRepetition
-                ),
-                systemImage: "play.circle.fill"
-            )
-                .foregroundStyle(.indigo)
+                    repetition: displayedRepetition,
+                    actionIndex: displayedActionIndex,
+                    actionCount: displayedActionCount
+                ))
         case .completed:
             Label("실행 완료", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
@@ -594,15 +609,25 @@ struct LibraryView: View {
     }
 
     private var displayedIteration: Int {
-        if case .playing(let iteration, _) = previewState { return iteration }
+        if case .playing(let iteration, _, _, _) = previewState { return iteration }
         return player.currentIteration
     }
 
     private var displayedRepetition: PlaybackOptions.Repetition {
-        if case .playing(_, let repeatCount) = previewState {
+        if case .playing(_, let repeatCount, _, _) = previewState {
             return .finite(repeatCount)
         }
         return player.activeOptions?.repetition ?? playbackOptions.repetition
+    }
+
+    private var displayedActionIndex: Int {
+        if case .playing(_, _, let actionIndex, _) = previewState { return actionIndex }
+        return player.currentActionIndex
+    }
+
+    private var displayedActionCount: Int {
+        if case .playing(_, _, _, let actionCount) = previewState { return actionCount }
+        return player.totalActionCount
     }
 
     private var playbackOptions: PlaybackOptions {
@@ -977,6 +1002,25 @@ private struct LibraryRow: View {
         }
         .padding(.vertical, 5)
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct PlaybackProgressChip: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .fontWeight(.semibold)
+                .monospacedDigit()
+        }
+        .font(.caption)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
     }
 }
 

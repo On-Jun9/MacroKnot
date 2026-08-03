@@ -150,8 +150,10 @@ func formatsFiniteAndInfinitePlaybackProgress() {
     #expect(
         PlaybackProgressPresentation.statusText(
             iteration: 2,
-            repetition: .finite(3)
-        ) == "반복 2/3"
+            repetition: .finite(3),
+            actionIndex: 6,
+            actionCount: 14
+        ) == "반복 2/3 · 액션 6/14"
     )
     #expect(
         PlaybackProgressPresentation.statusText(

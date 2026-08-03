@@ -71,7 +71,12 @@ struct DebugUISnapshotRoot: View {
         case .playing:
             LibraryView(
                 permissions: permissions,
-                previewState: .playing(iteration: 2, repeatCount: 3)
+                previewState: .playing(
+                    iteration: 2,
+                    repeatCount: 3,
+                    actionIndex: 6,
+                    actionCount: 14
+                )
             )
             .environmentObject(libraryStore)
         case .playbackOptions:
