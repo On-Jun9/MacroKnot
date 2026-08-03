@@ -227,9 +227,12 @@ func groupsConsecutiveMouseMovesForLibraryPreview() {
 
     #expect(preview.count == 3)
     #expect(preview[0].sourceLabel == "1–3")
+    #expect(preview[0].contains(actionNumber: 2))
+    #expect(!preview[0].contains(actionNumber: 4))
     #expect(preview[0].title == "마우스 이동 ×3")
     #expect(preview[0].summary == "(10, 20) → (30, 40) · 연속 이동 경로")
     #expect(preview[1].kind == .click)
+    #expect(preview[1].contains(actionNumber: 4))
     #expect(preview[2].sourceLabel == "5–6")
 }
 

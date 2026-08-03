@@ -270,14 +270,14 @@ struct LibraryView: View {
                     action: permissions.openScreenCaptureSettings
                 )
             }
-            ScrollView {
+            GeometryReader { _ in
                 VStack(alignment: .leading, spacing: 22) {
                     playbackCard(record)
                     actionPreview(record.document.actions)
                 }
                 .padding(24)
-                .frame(maxWidth: 920)
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: 920, maxHeight: .infinity, alignment: .top)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .background(Color(nsColor: .windowBackgroundColor))
         }
@@ -415,6 +415,7 @@ struct LibraryView: View {
                         } label: {
                             Image(systemName: "minus")
                                 .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
                         }
                         .disabled(repeatCount <= 2)
 
@@ -433,6 +434,7 @@ struct LibraryView: View {
                         } label: {
                             Image(systemName: "plus")
                                 .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
                         }
                         .disabled(repeatCount >= 9_999)
                     }
@@ -464,6 +466,9 @@ struct LibraryView: View {
 
     private func actionPreview(_ actions: [MacroAction]) -> some View {
         let previewItems = MacroActionPreviewItem.grouped(actions)
+        let activeItemID = isPlaybackRunning
+            ? previewItems.first(where: { $0.contains(actionNumber: displayedActionIndex) })?.id
+            : nil
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("액션 미리보기")
@@ -486,41 +491,42 @@ struct LibraryView: View {
                     in: RoundedRectangle(cornerRadius: 12)
                 )
             } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(previewItems.enumerated()), id: \.element.id) { index, item in
-                        HStack(spacing: 12) {
-                            Text(item.sourceLabel)
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 42, alignment: .trailing)
-                            Image(systemName: item.kind.systemImage)
-                                .foregroundStyle(item.kind.tint)
-                                .frame(width: 26, height: 26)
-                                .background(item.kind.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.title)
-                                    .font(.callout.weight(.medium))
-                                Text(item.summary)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(Array(previewItems.enumerated()), id: \.element.id) { index, item in
+                                ActionPreviewRow(
+                                    item: item,
+                                    isActive: item.id == activeItemID
+                                )
+                                .id(item.id)
+                                if index < previewItems.count - 1 {
+                                    Divider().padding(.leading, 80)
+                                }
                             }
-                            Spacer()
                         }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        if index < previewItems.count - 1 { Divider().padding(.leading, 80) }
+                        .background(Color(nsColor: .controlBackgroundColor))
                     }
-                }
-                .background(
-                    Color(nsColor: .controlBackgroundColor),
-                    in: RoundedRectangle(cornerRadius: 12)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08))
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08))
+                    }
+                    .onAppear {
+                        guard let activeItemID else { return }
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(activeItemID, anchor: .center)
+                        }
+                    }
+                    .onChange(of: activeItemID) { _, itemID in
+                        guard let itemID else { return }
+                        proxy.scrollTo(itemID, anchor: .center)
+                    }
                 }
             }
         }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .layoutPriority(1)
     }
 
     private func previewCountText(actionCount: Int, itemCount: Int) -> String {
@@ -1021,6 +1027,46 @@ private struct PlaybackProgressChip: View {
         .padding(.horizontal, 7)
         .padding(.vertical, 4)
         .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+private struct ActionPreviewRow: View {
+    let item: MacroActionPreviewItem
+    let isActive: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(item.sourceLabel)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 42, alignment: .trailing)
+            Image(systemName: item.kind.systemImage)
+                .foregroundStyle(item.kind.tint)
+                .frame(width: 26, height: 26)
+                .background(item.kind.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .font(.callout.weight(.medium))
+                Text(item.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(isActive ? Color.accentColor.opacity(0.09) : Color.clear)
+        .overlay(alignment: .leading) {
+            if isActive {
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 6)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(isActive ? "현재 실행 중" : "")
     }
 }
 

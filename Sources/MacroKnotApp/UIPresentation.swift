@@ -243,6 +243,11 @@ struct MacroActionPreviewItem: Identifiable {
     var kind: MacroAction.Kind { firstAction.kind }
     var count: Int { endIndex - startIndex + 1 }
 
+    func contains(actionNumber: Int) -> Bool {
+        let index = actionNumber - 1
+        return startIndex...endIndex ~= index
+    }
+
     var sourceLabel: String {
         startIndex == endIndex
             ? "\(startIndex + 1)"
