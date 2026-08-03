@@ -18,7 +18,6 @@ public struct MacroExecutionEngine: Sendable {
         try await run(
             actions,
             path: [],
-            reportsTopLevelProgress: true,
             onTopLevelActionStarted: onTopLevelActionStarted
         )
     }
@@ -26,13 +25,13 @@ public struct MacroExecutionEngine: Sendable {
     private func run(
         _ actions: [MacroAction],
         path: [Int],
-        reportsTopLevelProgress: Bool,
         onTopLevelActionStarted: (Int) async -> Void
     ) async throws {
         for (index, action) in actions.enumerated() {
             do {
                 try Task.checkCancellation()
-                if reportsTopLevelProgress {
+                // 빈 path가 최상위 실행을 뜻하므로 반복 블록 안에서는 보고하지 않는다.
+                if path.isEmpty {
                     await onTopLevelActionStarted(index + 1)
                 }
                 if let delay = action.delayBeforeMilliseconds, delay > 0 {
@@ -44,7 +43,6 @@ public struct MacroExecutionEngine: Sendable {
                         try await run(
                             repeatBlock.actions,
                             path: path + [index + 1],
-                            reportsTopLevelProgress: false,
                             onTopLevelActionStarted: onTopLevelActionStarted
                         )
                     }

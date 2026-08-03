@@ -179,12 +179,14 @@ func presentsDraftNameAndLastUpdatedTimeForRecovery() {
         return "2026년 7월 30일 오전 2:40"
     }
     #expect(formattedDate == updatedAt)
-    #expect(DraftRecoveryPresentation.title(for: draft) == "월간 보고서 자동화")
-    #expect(message == "마지막 수정: 2026년 7월 30일 오전 2:40")
+    #expect(message == "월간 보고서 자동화 · 마지막 수정: 2026년 7월 30일 오전 2:40")
 
     var unnamedDraft = draft
     unnamedDraft.document.name = "  \n"
-    #expect(DraftRecoveryPresentation.title(for: unnamedDraft) == "이름 없는 매크로")
+    let unnamedMessage = DraftRecoveryPresentation.message(for: unnamedDraft) { _ in
+        "2026년 7월 30일 오전 2:40"
+    }
+    #expect(unnamedMessage == "이름 없는 매크로 · 마지막 수정: 2026년 7월 30일 오전 2:40")
 }
 
 @Test

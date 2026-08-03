@@ -218,7 +218,7 @@ enum PlaybackProgressPresentation {
 }
 
 enum DraftRecoveryPresentation {
-    static func title(for draft: MacroDraftRecord) -> String {
+    private static func name(for draft: MacroDraftRecord) -> String {
         let trimmedName = draft.document.name.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedName.isEmpty ? "이름 없는 매크로" : trimmedName
     }
@@ -226,10 +226,10 @@ enum DraftRecoveryPresentation {
     static func message(
         for draft: MacroDraftRecord,
         formatDate: (Date) -> String = {
-            $0.formatted(date: .numeric, time: .shortened)
+            $0.formatted(date: .abbreviated, time: .shortened)
         }
     ) -> String {
-        "마지막 수정: \(formatDate(draft.updatedAt))"
+        "\(name(for: draft)) · 마지막 수정: \(formatDate(draft.updatedAt))"
     }
 }
 

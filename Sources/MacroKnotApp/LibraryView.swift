@@ -82,7 +82,7 @@ struct LibraryView: View {
                     : { isDeleteConfirmationPresented = true }
             )
         )
-        .alert(draftRecoveryTitle, isPresented: $isDraftRecoveryPresented) {
+        .alert("저장되지 않은 초안이 있습니다", isPresented: $isDraftRecoveryPresented) {
             Button("계속 편집") { openRecoverableDraft() }
             Button("초안 삭제", role: .destructive) { store.discardDraft() }
         } message: {
@@ -266,15 +266,13 @@ struct LibraryView: View {
                     action: permissions.openScreenCaptureSettings
                 )
             }
-            GeometryReader { _ in
-                VStack(alignment: .leading, spacing: 22) {
-                    playbackCard(record)
-                    actionPreview(record.document.actions)
-                }
-                .padding(24)
-                .frame(maxWidth: 920, maxHeight: .infinity, alignment: .top)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(alignment: .leading, spacing: 22) {
+                playbackCard(record)
+                actionPreview(record.document.actions)
             }
+            .padding(24)
+            .frame(maxWidth: 920, maxHeight: .infinity, alignment: .top)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
         }
     }
@@ -486,7 +484,8 @@ struct LibraryView: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        VStack(spacing: 0) {
+                        // 재생 중에는 액션마다 목록이 갱신되므로 보이는 행만 만든다.
+                        LazyVStack(spacing: 0) {
                             ForEach(Array(previewItems.enumerated()), id: \.element.id) { index, item in
                                 ActionPreviewRow(
                                     item: item,
@@ -545,8 +544,9 @@ struct LibraryView: View {
     private var playbackStatus: some View {
         switch displayedPlayerState {
         case .running:
+            let runningTitle = "실행 중"
             HStack(spacing: 5) {
-                Label("실행 중", systemImage: "play.circle.fill")
+                Label(runningTitle, systemImage: "play.circle.fill")
                     .foregroundStyle(.indigo)
                 PlaybackProgressChip(
                     title: "반복",
@@ -562,12 +562,15 @@ struct LibraryView: View {
                     PlaybackProgressChip(title: "액션", value: actionValue)
                 }
             }
-                .accessibilityLabel(PlaybackProgressPresentation.statusText(
-                    iteration: displayedIteration,
-                    repetition: displayedRepetition,
-                    actionIndex: displayedActionIndex,
-                    actionCount: displayedActionCount
-                ))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(runningTitle)
+            .accessibilityValue(PlaybackProgressPresentation.statusText(
+                iteration: displayedIteration,
+                repetition: displayedRepetition,
+                actionIndex: displayedActionIndex,
+                actionCount: displayedActionCount
+            ))
+            .accessibilityAddTraits(.updatesFrequently)
         case .completed:
             Label("실행 완료", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
@@ -684,11 +687,6 @@ struct LibraryView: View {
     private var isDraftConflictIntentCreate: Bool {
         if case .create = draftConflictIntent { return true }
         return false
-    }
-
-    private var draftRecoveryTitle: String {
-        guard let draft = store.recoverableDraft else { return "저장되지 않은 초안" }
-        return DraftRecoveryPresentation.title(for: draft)
     }
 
     private var draftRecoveryMessage: String {

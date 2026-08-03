@@ -5,8 +5,9 @@ private final class MacroKnotApplicationDelegate: NSObject, NSApplicationDelegat
     private var mouseDownMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
-            guard let window = event.window,
+        mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self,
+                  let window = event.window,
                   window.firstResponder is NSTextView,
                   !self.isTextInputHit(by: event, in: window)
             else {

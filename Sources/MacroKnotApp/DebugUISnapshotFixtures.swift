@@ -71,9 +71,9 @@ struct DebugUISnapshotRoot: View {
             LibraryView(permissions: permissions)
                 .environmentObject(libraryStore)
         case .layoutStress:
+            // macOS는 Dynamic Type을 지원하지 않으므로 긴 이름과 다국어 문자열로만 레이아웃을 압박한다.
             LibraryView(permissions: permissions)
                 .environmentObject(libraryStore)
-                .dynamicTypeSize(.accessibility1)
         case .playing:
             LibraryView(
                 permissions: permissions,

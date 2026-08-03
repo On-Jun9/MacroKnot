@@ -125,7 +125,7 @@ final class InputPlayer: ObservableObject {
                     try Task.checkCancellation()
                     self?.currentIteration = iteration + 1
                     self?.currentActionIndex = 1
-                    try await engine.run(actions) { [weak self] actionIndex in
+                    try await engine.run(actions) { actionIndex in
                         await MainActor.run {
                             self?.currentActionIndex = actionIndex
                         }
