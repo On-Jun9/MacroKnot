@@ -49,6 +49,8 @@ struct DebugUISnapshotRoot: View {
             MacroEditorCancelFlowFixture(scenario: .cancelWithoutChanges)
         } else if configuration.fixture == .macroEditorCancelRecoveredFlow {
             MacroEditorCancelFlowFixture(scenario: .cancelRecoveredDraft)
+        } else if configuration.fixture == .coordinatePickerSheetFlow {
+            CoordinatePickerSheetFlowFixture()
         } else {
             LibraryView(permissions: permissions)
         }
@@ -67,8 +69,11 @@ struct DebugUISnapshotRoot: View {
             LibraryView(permissions: permissions)
                 .environmentObject(libraryStore)
         case .playing:
-            LibraryView(permissions: permissions, previewState: .playing(iteration: 2))
-                .environmentObject(libraryStore)
+            LibraryView(
+                permissions: permissions,
+                previewState: .playing(iteration: 2, repeatCount: 3)
+            )
+            .environmentObject(libraryStore)
         case .playbackOptions:
             LibraryView(
                 permissions: permissions,
@@ -124,6 +129,8 @@ struct DebugUISnapshotRoot: View {
             CoordinatePickerFlowFixture(automatedAction: .select)
         case .coordinatePickerCancelFlow:
             CoordinatePickerFlowFixture(automatedAction: .cancel)
+        case .coordinatePickerSheetFlow:
+            CoordinatePickerSheetFlowFixture()
         case .macroEditorCancelFlow:
             MacroEditorCancelFlowFixture(scenario: .cancelWithChanges)
         case .macroEditorCancelDirectFlow:
@@ -351,6 +358,7 @@ private struct UISnapshotConfiguration {
         case coordinatePicker = "coordinate-picker"
         case coordinatePickerFlow = "coordinate-picker-flow"
         case coordinatePickerCancelFlow = "coordinate-picker-cancel-flow"
+        case coordinatePickerSheetFlow = "coordinate-picker-sheet-flow"
         case settings
         case settingsRecording = "settings-recording"
         case settingsShortcuts = "settings-shortcuts"
@@ -475,6 +483,113 @@ private struct CoordinatePickerFlowFixture: View {
             .post(tap: .cghidEventTap)
         CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: false)?
             .post(tap: .cghidEventTap)
+    }
+}
+
+/// 시트가 열린 창에서 좌표 선택을 실행했다 취소한 뒤, 창이 다시 보이고
+/// 시트가 부모 창에 부착된 채 복원되는지를 runtime.jsonl에 PASS/FAIL로 남기는 자동 시험.
+/// 선택 동안에도 창이 윈도우 목록에 남아 있어야(AltTab에서 사라지지 않아야) 한다.
+private struct CoordinatePickerSheetFlowFixture: View {
+    @StateObject private var coordinatePicker = ScreenCoordinatePicker()
+    @State private var didStart = false
+    @State private var isSheetPresented = false
+    @State private var statusText = "좌표 선택 시트 복원 시험 준비"
+    @State private var hostWindow: NSWindow?
+    @State private var hostConcealedDuringPick = false
+    @State private var hostListedDuringPick = false
+    @State private var sheetAttachedDuringPick = false
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "hammer.circle")
+                .font(.system(size: 30, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+            Text(statusText)
+                .font(.headline)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(isPresented: $isSheetPresented) {
+            VStack(spacing: 10) {
+                Text("시트 복원 확인용")
+                    .font(.headline)
+                Text("좌표 선택 동안 이 시트가 부착 상태를 유지해야 합니다.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(28)
+            .frame(width: 360)
+        }
+        .onAppear(perform: startOnce)
+    }
+
+    private func startOnce() {
+        guard !didStart else { return }
+        didStart = true
+        RuntimeEventLogger.record("coordinate_picker_sheet_flow_started", fields: [:])
+
+        after(0.3) {
+            statusText = "시트 표시"
+            hostWindow = NSApplication.shared.windows.first { window in
+                window.isVisible && window.level == .normal
+            }
+            isSheetPresented = true
+        }
+        after(1.3) {
+            guard let hostWindow, hostWindow.attachedSheet != nil else {
+                finish(result: "FAIL", fields: ["stage": "sheet_not_presented"])
+                return
+            }
+            statusText = "좌표 선택 시작"
+            coordinatePicker.begin { _ in }
+        }
+        after(2.1) {
+            hostConcealedDuringPick = hostWindow?.alphaValue == 0
+            hostListedDuringPick = hostWindow?.isVisible == true
+            sheetAttachedDuringPick = hostWindow?.attachedSheet != nil
+            statusText = "좌표 선택 취소로 복원"
+            coordinatePicker.cancel()
+        }
+        after(2.9) {
+            let hostRestored = hostWindow?.isVisible == true
+                && hostWindow?.alphaValue == 1
+            let attachedSheet = hostWindow?.attachedSheet
+            let sheetRestored = attachedSheet != nil
+                && attachedSheet?.isVisible == true
+                && attachedSheet?.alphaValue == 1
+                && attachedSheet?.sheetParent === hostWindow
+            let passed = hostConcealedDuringPick && hostListedDuringPick
+                && sheetAttachedDuringPick && hostRestored && sheetRestored
+            finish(
+                result: passed ? "PASS" : "FAIL",
+                fields: [
+                    "host_concealed_during_pick": String(hostConcealedDuringPick),
+                    "host_listed_during_pick": String(hostListedDuringPick),
+                    "sheet_attached_during_pick": String(sheetAttachedDuringPick),
+                    "host_restored_after": String(hostRestored),
+                    "sheet_restored_attached": String(sheetRestored),
+                ]
+            )
+        }
+    }
+
+    private func after(_ seconds: Double, _ work: @escaping @MainActor () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            work()
+        }
+    }
+
+    private func finish(result: String, fields: [String: String]) {
+        RuntimeEventLogger.record(
+            "coordinate_picker_sheet_flow_result",
+            result: result,
+            fields: fields
+        )
+        // 시트 모달 세션이 남아 있으면 terminate가 진행되지 않고
+        // 앱이 시트와 함께 화면에 남으므로 시트를 닫은 뒤 종료한다.
+        isSheetPresented = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApplication.shared.terminate(nil)
+        }
     }
 }
 

@@ -10,7 +10,7 @@ private enum DraftConflictIntent {
 
 enum LibraryPlaybackPreviewState {
     case live
-    case playing(iteration: Int)
+    case playing(iteration: Int, repeatCount: Int)
     case failed(String)
     case configured(rate: Double, repeatCount: Int)
 }
@@ -40,10 +40,16 @@ struct LibraryView: View {
     ) {
         self.permissions = permissions
         self.previewState = previewState
-        if case .configured(let rate, let repeatCount) = previewState {
+        switch previewState {
+        case .configured(let rate, let repeatCount):
             _playbackRate = State(initialValue: rate)
             _repetitionMode = State(initialValue: .finite)
             _repeatCount = State(initialValue: max(2, repeatCount))
+        case .playing(_, let repeatCount):
+            _repetitionMode = State(initialValue: .finite)
+            _repeatCount = State(initialValue: max(2, repeatCount))
+        case .live, .failed:
+            break
         }
     }
 
@@ -359,6 +365,8 @@ struct LibraryView: View {
                 .padding(3)
                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
                 .frame(maxWidth: .infinity)
+                .disabled(isPlaybackRunning)
+                .opacity(isPlaybackRunning ? 0.55 : 1)
             }
 
             HStack(spacing: 10) {
@@ -397,6 +405,8 @@ struct LibraryView: View {
                 }
                 .padding(3)
                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+                .disabled(isPlaybackRunning)
+                .opacity(isPlaybackRunning ? 0.55 : 1)
 
                 if repetitionMode == .finite {
                     HStack(spacing: 0) {
@@ -428,6 +438,8 @@ struct LibraryView: View {
                     }
                     .buttonStyle(.plain)
                     .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+                    .disabled(isPlaybackRunning)
+                    .opacity(isPlaybackRunning ? 0.55 : 1)
                     .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
@@ -571,8 +583,12 @@ struct LibraryView: View {
         }
     }
 
+    private var isPlaybackRunning: Bool {
+        displayedPlayerState == .running
+    }
+
     private var displayedIteration: Int {
-        if case .playing(let iteration) = previewState { return iteration }
+        if case .playing(let iteration, _) = previewState { return iteration }
         return player.currentIteration
     }
 

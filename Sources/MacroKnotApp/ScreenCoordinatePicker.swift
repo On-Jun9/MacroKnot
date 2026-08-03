@@ -32,7 +32,7 @@ final class ScreenCoordinatePicker: ObservableObject {
     @Published private(set) var isSelecting = false
 
     private weak var previousKeyWindow: NSWindow?
-    private var windowsToRestore: [NSWindow] = []
+    private var concealedWindows: [(window: NSWindow, alphaValue: CGFloat)] = []
     private var selectionPanels: [NSPanel] = []
     private var completion: ((ScreenCoordinatePickerOutcome) -> Void)?
 
@@ -47,10 +47,13 @@ final class ScreenCoordinatePicker: ObservableObject {
         isSelecting = true
         self.completion = completion
         previousKeyWindow = NSApplication.shared.keyWindow
-        windowsToRestore = NSApplication.shared.windows.filter { window in
-            window.isVisible && window.level == .normal
-        }
-        windowsToRestore.forEach { $0.orderOut(nil) }
+        // orderOut은 창을 윈도우 목록에서 제거해 시트 부착이 끊기고
+        // AltTab류 유틸에 창이 사라졌다 생기는 것으로 보인다.
+        // 창 목록·순서·부착을 유지하도록 투명도만 낮춰 화면에서 감춘다.
+        concealedWindows = NSApplication.shared.windows
+            .filter { $0.isVisible && $0.level == .normal }
+            .map { ($0, $0.alphaValue) }
+        concealedWindows.forEach { $0.window.alphaValue = 0 }
 
         selectionPanels = screens.map(makeSelectionPanel(for:))
         selectionPanels.forEach { $0.orderFrontRegardless() }
@@ -60,7 +63,6 @@ final class ScreenCoordinatePicker: ObservableObject {
         let keyPanel = selectionPanels.first { $0.frame.contains(mouseLocation) }
             ?? selectionPanels.first
         keyPanel?.makeKey()
-        NSCursor.crosshair.set()
     }
 
     func cancel() {
@@ -91,7 +93,7 @@ final class ScreenCoordinatePicker: ObservableObject {
             .ignoresCycle,
         ]
         panel.onCancel = { [weak self] in self?.cancel() }
-        panel.contentView = NSHostingView(
+        panel.contentView = CrosshairHostingView(
             rootView: ScreenCoordinatePickerOverlay(
                 onSelect: { [weak self] in self?.selectCurrentPointerLocation() },
                 onCancel: { [weak self] in self?.cancel() }
@@ -119,9 +121,9 @@ final class ScreenCoordinatePicker: ObservableObject {
         selectionPanels.removeAll()
         NSCursor.arrow.set()
 
-        windowsToRestore.reversed().forEach { $0.orderFront(nil) }
-        windowsToRestore.removeAll()
-        previousKeyWindow?.makeKeyAndOrderFront(nil)
+        concealedWindows.forEach { $0.window.alphaValue = $0.alphaValue }
+        concealedWindows.removeAll()
+        previousKeyWindow?.makeKey()
         previousKeyWindow = nil
         NSApplication.shared.activate(ignoringOtherApps: true)
         isSelecting = false
@@ -131,6 +133,32 @@ final class ScreenCoordinatePicker: ObservableObject {
 
     nonisolated static func screenPoint(from location: CGPoint) -> ScreenPoint {
         ScreenPoint(x: location.x, y: location.y)
+    }
+}
+
+/// 일회성 `NSCursor.set()`은 AppKit의 cursor rect 갱신에 덮여 유지되지 않고,
+/// cursor rect는 key 창에서만 동작해 다중 디스플레이 패널에 쓸 수 없다.
+/// key 여부와 무관하게 동작하는 tracking area로 십자선 커서를 유지한다.
+private final class CrosshairHostingView<Content: View>: NSHostingView<Content> {
+    private var crosshairTrackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let crosshairTrackingArea {
+            removeTrackingArea(crosshairTrackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.cursorUpdate, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        crosshairTrackingArea = area
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.crosshair.set()
     }
 }
 
@@ -158,11 +186,6 @@ struct ScreenCoordinatePickerOverlay: View {
             Color.black.opacity(0.18)
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onSelect)
-                .onHover { hovering in
-                    if hovering {
-                        NSCursor.crosshair.set()
-                    }
-                }
 
             VStack(spacing: 7) {
                 Label("위치를 클릭하세요", systemImage: "scope")
