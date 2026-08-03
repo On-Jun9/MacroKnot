@@ -366,7 +366,6 @@ struct LibraryView: View {
                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
                 .frame(maxWidth: .infinity)
                 .disabled(isPlaybackRunning)
-                .opacity(isPlaybackRunning ? 0.55 : 1)
             }
 
             HStack(spacing: 10) {
@@ -406,7 +405,6 @@ struct LibraryView: View {
                 .padding(3)
                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
                 .disabled(isPlaybackRunning)
-                .opacity(isPlaybackRunning ? 0.55 : 1)
 
                 if repetitionMode == .finite {
                     HStack(spacing: 0) {
@@ -441,7 +439,6 @@ struct LibraryView: View {
                     .buttonStyle(.plain)
                     .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
                     .disabled(isPlaybackRunning)
-                    .opacity(isPlaybackRunning ? 0.55 : 1)
                     .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
@@ -1004,7 +1001,7 @@ private struct LibraryRow: View {
             .foregroundStyle(Color(nsColor: .secondaryLabelColor))
             Text(record.modifiedAt.formatted(date: .abbreviated, time: .shortened))
                 .font(.caption2)
-                .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
         }
         .padding(.vertical, 5)
         .accessibilityElement(children: .combine)
@@ -1038,7 +1035,7 @@ private struct ActionPreviewRow: View {
         HStack(spacing: 12) {
             Text(item.sourceLabel)
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
                 .frame(width: 42, alignment: .trailing)
             Image(systemName: item.kind.systemImage)
                 .foregroundStyle(item.kind.tint)
