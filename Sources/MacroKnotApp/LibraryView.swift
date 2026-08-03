@@ -82,11 +82,11 @@ struct LibraryView: View {
                     : { isDeleteConfirmationPresented = true }
             )
         )
-        .alert("저장되지 않은 초안이 있습니다", isPresented: $isDraftRecoveryPresented) {
+        .alert(draftRecoveryTitle, isPresented: $isDraftRecoveryPresented) {
             Button("계속 편집") { openRecoverableDraft() }
             Button("초안 삭제", role: .destructive) { store.discardDraft() }
         } message: {
-            Text("이전에 편집하던 내용을 이어서 작업할 수 있습니다.")
+            Text(draftRecoveryMessage)
         }
         .alert("선택한 매크로를 삭제할까요?", isPresented: $isDeleteConfirmationPresented) {
             Button("삭제", role: .destructive, action: deleteSelectedMacro)
@@ -653,6 +653,18 @@ struct LibraryView: View {
     private var isDraftConflictIntentCreate: Bool {
         if case .create = draftConflictIntent { return true }
         return false
+    }
+
+    private var draftRecoveryTitle: String {
+        guard let draft = store.recoverableDraft else { return "저장되지 않은 초안" }
+        return DraftRecoveryPresentation.title(for: draft)
+    }
+
+    private var draftRecoveryMessage: String {
+        guard let draft = store.recoverableDraft else {
+            return "이전에 편집하던 내용을 이어서 작업할 수 있습니다."
+        }
+        return DraftRecoveryPresentation.message(for: draft)
     }
 
     private func createMacro() {
