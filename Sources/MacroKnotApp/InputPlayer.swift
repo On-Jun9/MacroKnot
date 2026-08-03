@@ -38,6 +38,7 @@ final class InputPlayer: ObservableObject {
 
     @Published private(set) var state = State.idle
     @Published private(set) var currentIteration = 0
+    @Published private(set) var activeOptions: PlaybackOptions?
     private var task: Task<Void, Never>?
     private var performer: (any InputReleasingActionPerformer)?
     private let globalStopMonitor: any GlobalStopMonitoring
@@ -100,6 +101,7 @@ final class InputPlayer: ObservableObject {
         }
         state = .running
         currentIteration = 1
+        activeOptions = options
         RuntimeEventLogger.record(
             "playback_started",
             result: "PASS",
@@ -149,6 +151,7 @@ final class InputPlayer: ObservableObject {
         self.state = state
         if state != .running {
             currentIteration = 0
+            activeOptions = nil
         }
         task = nil
         performer = nil

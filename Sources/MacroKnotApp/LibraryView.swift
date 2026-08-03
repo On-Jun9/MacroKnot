@@ -546,7 +546,13 @@ struct LibraryView: View {
     private var playbackStatus: some View {
         switch displayedPlayerState {
         case .running:
-            Label("\(displayedIteration)번째 실행 중", systemImage: "play.circle.fill")
+            Label(
+                PlaybackProgressPresentation.statusText(
+                    iteration: displayedIteration,
+                    repetition: displayedRepetition
+                ),
+                systemImage: "play.circle.fill"
+            )
                 .foregroundStyle(.indigo)
         case .completed:
             Label("실행 완료", systemImage: "checkmark.circle.fill")
@@ -590,6 +596,13 @@ struct LibraryView: View {
     private var displayedIteration: Int {
         if case .playing(let iteration, _) = previewState { return iteration }
         return player.currentIteration
+    }
+
+    private var displayedRepetition: PlaybackOptions.Repetition {
+        if case .playing(_, let repeatCount) = previewState {
+            return .finite(repeatCount)
+        }
+        return player.activeOptions?.repetition ?? playbackOptions.repetition
     }
 
     private var playbackOptions: PlaybackOptions {

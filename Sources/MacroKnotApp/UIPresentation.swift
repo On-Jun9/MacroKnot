@@ -168,6 +168,20 @@ enum MacroDurationFormatter {
     }
 }
 
+enum PlaybackProgressPresentation {
+    static func statusText(
+        iteration: Int,
+        repetition: PlaybackOptions.Repetition
+    ) -> String {
+        switch repetition {
+        case .finite(let count):
+            return "반복 \(iteration)/\(count)"
+        case .infinite:
+            return "반복 \(iteration) · 무한 반복"
+        }
+    }
+}
+
 struct MacroActionPreviewItem: Identifiable {
     let id: UUID
     let startIndex: Int

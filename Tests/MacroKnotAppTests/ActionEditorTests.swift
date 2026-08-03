@@ -269,11 +269,13 @@ func preventsDuplicatePlaybackAndReleasesInputsWhenStopped() async {
             .keyboard(keyCode: 0, characters: "a", modifierFlags: 0),
         ]
     )
+    let options = PlaybackOptions(rate: 1.5, repetition: .finite(3))
 
-    player.play(document: document)
-    player.play(document: document)
+    player.play(document: document, options: options)
+    player.play(document: document, options: options)
 
     #expect(player.state == .running)
+    #expect(player.activeOptions == options)
     #expect(stopMonitor.startCount == 1)
     await performer.waitUntilStarted()
     player.stop()
@@ -282,6 +284,7 @@ func preventsDuplicatePlaybackAndReleasesInputsWhenStopped() async {
     }
 
     #expect(player.state == .stopped)
+    #expect(player.activeOptions == nil)
     #expect(await performer.releaseCount == 1)
     #expect(stopMonitor.stopCount == 1)
 }

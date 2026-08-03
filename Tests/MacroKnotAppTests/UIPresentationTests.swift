@@ -146,6 +146,22 @@ func calculatesNestedDurationAndSaturatesOverflow() {
 }
 
 @Test
+func formatsFiniteAndInfinitePlaybackProgress() {
+    #expect(
+        PlaybackProgressPresentation.statusText(
+            iteration: 2,
+            repetition: .finite(3)
+        ) == "반복 2/3"
+    )
+    #expect(
+        PlaybackProgressPresentation.statusText(
+            iteration: 7,
+            repetition: .infinite
+        ) == "반복 7 · 무한 반복"
+    )
+}
+
+@Test
 func detectsCaptureActionsInsideRepeatBlocks() {
     let withoutCapture: [MacroAction] = [
         .wait(milliseconds: 100),
