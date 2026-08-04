@@ -9,7 +9,12 @@ private final class MacroKnotApplicationDelegate: NSObject, NSApplicationDelegat
             guard let window = event.window,
                   TextFocusReleasePolicy.shouldRelease(
                       isEditingText: window.firstResponder is NSTextView,
-                      hitView: { Self.hitView(for: event, in: window) }
+                      hitView: {
+                          TextFocusReleasePolicy.hitView(
+                              in: window,
+                              at: event.locationInWindow
+                          )
+                      }
                   )
             else {
                 return event
@@ -26,12 +31,6 @@ private final class MacroKnotApplicationDelegate: NSObject, NSApplicationDelegat
         }
     }
 
-    private static func hitView(for event: NSEvent, in window: NSWindow) -> NSView? {
-        guard let contentView = window.contentView else { return nil }
-        // hitTest는 상위 뷰 좌표계의 점을 받는다. contentView의 상위는 창 프레임이므로
-        // 창 좌표를 그대로 넘긴다.
-        return contentView.hitTest(event.locationInWindow)
-    }
 }
 
 @main
