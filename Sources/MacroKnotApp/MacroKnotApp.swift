@@ -5,11 +5,12 @@ private final class MacroKnotApplicationDelegate: NSObject, NSApplicationDelegat
     private var mouseDownMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-            guard let self,
-                  let window = event.window,
-                  window.firstResponder is NSTextView,
-                  !self.isTextInputHit(by: event, in: window)
+        mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+            guard let window = event.window,
+                  TextFocusReleasePolicy.shouldRelease(
+                      isEditingText: window.firstResponder is NSTextView,
+                      hitView: { Self.hitView(for: event, in: window) }
+                  )
             else {
                 return event
             }
@@ -25,24 +26,9 @@ private final class MacroKnotApplicationDelegate: NSObject, NSApplicationDelegat
         }
     }
 
-    private func isTextInputHit(by event: NSEvent, in window: NSWindow) -> Bool {
-        guard let contentView = window.contentView,
-              var hitView = contentView.hitTest(
-                  contentView.convert(event.locationInWindow, from: nil)
-              )
-        else {
-            return false
-        }
-
-        while true {
-            if hitView is NSTextField || hitView is NSTextView {
-                return true
-            }
-            guard let superview = hitView.superview else {
-                return false
-            }
-            hitView = superview
-        }
+    private static func hitView(for event: NSEvent, in window: NSWindow) -> NSView? {
+        guard let contentView = window.contentView else { return nil }
+        return contentView.hitTest(contentView.convert(event.locationInWindow, from: nil))
     }
 }
 
