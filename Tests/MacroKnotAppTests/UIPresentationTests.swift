@@ -198,6 +198,14 @@ func separatesWaitActionCountdownFromStartDelayCountdown() {
 
     slowClick.delayBeforeMilliseconds = nil
     #expect(PlaybackWaitPresentation.displayedWait(for: slowClick) == nil)
+
+    // 합이 표현 범위를 넘으면 재생 중 죽지 않고 최대값으로 포화한다.
+    var overflowingWait = MacroAction.wait(milliseconds: .max)
+    overflowingWait.delayBeforeMilliseconds = 1
+    #expect(
+        PlaybackWaitPresentation.displayedWait(for: overflowingWait)
+            == .waitAction(milliseconds: .max)
+    )
 }
 
 @Test
