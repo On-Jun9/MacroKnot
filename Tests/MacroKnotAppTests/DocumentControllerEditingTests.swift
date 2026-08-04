@@ -44,6 +44,34 @@ func undoAndRedoRestoreActionListAroundAddedAction() {
 
 @MainActor
 @Test
+func addsActionRightAfterSelectionAndAtEndWithoutSelection() {
+    let first = MacroAction.wait(milliseconds: 100)
+    let second = MacroAction.wait(milliseconds: 200)
+    let third = MacroAction.wait(milliseconds: 300)
+    let fixture = EditingFixture(actions: [first, second, third])
+
+    let afterFirst = MacroAction.wait(milliseconds: 400)
+    fixture.controller.addAction(afterFirst, after: [first.id])
+    #expect(
+        fixture.controller.document.actions.map(\.id)
+            == [first.id, afterFirst.id, second.id, third.id]
+    )
+
+    // 여러 개를 고른 상태에서는 마지막으로 선택된 액션 다음에 들어간다.
+    let afterSecond = MacroAction.wait(milliseconds: 500)
+    fixture.controller.addAction(afterSecond, after: [first.id, second.id])
+    #expect(
+        fixture.controller.document.actions.map(\.id)
+            == [first.id, afterFirst.id, second.id, afterSecond.id, third.id]
+    )
+
+    let appended = MacroAction.wait(milliseconds: 600)
+    fixture.controller.addAction(appended, after: [])
+    #expect(fixture.controller.document.actions.last?.id == appended.id)
+}
+
+@MainActor
+@Test
 func undoRestoresOrderAfterMovingActions() {
     let first = MacroAction.wait(milliseconds: 100)
     let second = MacroAction.wait(milliseconds: 200)

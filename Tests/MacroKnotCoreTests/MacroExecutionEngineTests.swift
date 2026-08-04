@@ -5,6 +5,7 @@ import Testing
 @Test
 func executesActionsInOrderAndExpandsRepeatBlocks() async throws {
     let performer = RecordingPerformer()
+    let progress = ActionProgressRecorder()
     let engine = MacroExecutionEngine(performer: performer)
     let actions: [MacroAction] = [
         .wait(milliseconds: 10),
@@ -14,9 +15,12 @@ func executesActionsInOrderAndExpandsRepeatBlocks() async throws {
         ]),
     ]
 
-    try await engine.run(actions)
+    try await engine.run(actions) { index in
+        await progress.record(index)
+    }
 
     #expect(await performer.kinds == [.wait, .keyboard, .wait, .keyboard, .wait])
+    #expect(await progress.indices == [1, 2])
 }
 
 @Test
@@ -96,6 +100,14 @@ private actor RecordingPerformer: MacroActionPerforming {
 
     func perform(_ action: MacroAction) {
         kinds.append(action.kind)
+    }
+}
+
+private actor ActionProgressRecorder {
+    private(set) var indices: [Int] = []
+
+    func record(_ index: Int) {
+        indices.append(index)
     }
 }
 

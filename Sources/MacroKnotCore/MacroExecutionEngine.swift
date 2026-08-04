@@ -11,21 +11,40 @@ public struct MacroExecutionEngine: Sendable {
         self.performer = performer
     }
 
-    public func run(_ actions: [MacroAction]) async throws {
-        try await run(actions, path: [])
+    public func run(
+        _ actions: [MacroAction],
+        onTopLevelActionStarted: (Int) async -> Void = { _ in }
+    ) async throws {
+        try await run(
+            actions,
+            path: [],
+            onTopLevelActionStarted: onTopLevelActionStarted
+        )
     }
 
-    private func run(_ actions: [MacroAction], path: [Int]) async throws {
+    private func run(
+        _ actions: [MacroAction],
+        path: [Int],
+        onTopLevelActionStarted: (Int) async -> Void
+    ) async throws {
         for (index, action) in actions.enumerated() {
             do {
                 try Task.checkCancellation()
+                // 빈 path가 최상위 실행을 뜻하므로 반복 블록 안에서는 보고하지 않는다.
+                if path.isEmpty {
+                    await onTopLevelActionStarted(index + 1)
+                }
                 if let delay = action.delayBeforeMilliseconds, delay > 0 {
                     try await Task.sleep(for: .milliseconds(delay))
                 }
                 if action.kind == .repeatBlock, let repeatBlock = action.repeatBlock {
                     for _ in 0..<repeatBlock.count {
                         try Task.checkCancellation()
-                        try await run(repeatBlock.actions, path: path + [index + 1])
+                        try await run(
+                            repeatBlock.actions,
+                            path: path + [index + 1],
+                            onTopLevelActionStarted: onTopLevelActionStarted
+                        )
                     }
                 } else {
                     try await performer.perform(action)

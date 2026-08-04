@@ -36,9 +36,26 @@ final class InputPlayer: ObservableObject {
         case failed(String)
     }
 
+    /// 실행 중인 대기의 종류와 시작·종료 시각. 화면이 남은 시간을 직접 세도록 구간으로 노출한다.
+    struct ActiveWait: Equatable {
+        enum Kind: Equatable {
+            case waitAction
+            case delayBeforeAction
+        }
+
+        let kind: Kind
+        let start: Date
+        let end: Date
+    }
+
     @Published private(set) var state = State.idle
     @Published private(set) var currentIteration = 0
+    @Published private(set) var currentActionIndex = 0
+    @Published private(set) var totalActionCount = 0
+    @Published private(set) var activeOptions: PlaybackOptions?
+    @Published private(set) var activeWait: ActiveWait?
     private var task: Task<Void, Never>?
+    private var waitClearTask: Task<Void, Never>?
     private var performer: (any InputReleasingActionPerformer)?
     private let globalStopMonitor: any GlobalStopMonitoring
     private let performerFactory: () -> any InputReleasingActionPerformer
@@ -100,6 +117,9 @@ final class InputPlayer: ObservableObject {
         }
         state = .running
         currentIteration = 1
+        currentActionIndex = 1
+        totalActionCount = actions.count
+        activeOptions = options
         RuntimeEventLogger.record(
             "playback_started",
             result: "PASS",
@@ -118,7 +138,13 @@ final class InputPlayer: ObservableObject {
                 while options.repetition.shouldRun(iteration: iteration) {
                     try Task.checkCancellation()
                     self?.currentIteration = iteration + 1
-                    try await engine.run(actions)
+                    self?.currentActionIndex = 1
+                    try await engine.run(actions) { actionIndex in
+                        await MainActor.run {
+                            self?.currentActionIndex = actionIndex
+                            self?.updateActiveWait(for: actions[actionIndex - 1])
+                        }
+                    }
                     iteration += 1
                 }
                 await performer.releaseAllInputs()
@@ -145,10 +171,40 @@ final class InputPlayer: ObservableObject {
         globalStopMonitor.stop()
     }
 
+    /// 기다리는 액션에 들어가면 남은 시간 구간을 세우고, 그렇지 않은 액션에서는 지운다.
+    private func updateActiveWait(for action: MacroAction) {
+        waitClearTask?.cancel()
+        waitClearTask = nil
+        guard let wait = PlaybackWaitPresentation.displayedWait(for: action) else {
+            activeWait = nil
+            return
+        }
+        let start = Date()
+        let active = ActiveWait(
+            kind: wait.isWaitAction ? .waitAction : .delayBeforeAction,
+            start: start,
+            end: start.addingTimeInterval(Double(wait.milliseconds) / 1_000)
+        )
+        activeWait = active
+        // 다음 액션 보고를 기다리면 `0:00`이 행에 남는다. `실행 전 대기`는 그 뒤에 액션
+        // 실행이 이어지고 반복 블록은 내부 액션을 보고하지 않아 그 시간이 길 수 있다.
+        waitClearTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(wait.milliseconds))
+            guard !Task.isCancelled, self?.activeWait == active else { return }
+            self?.activeWait = nil
+        }
+    }
+
     private func finish(_ state: State) {
         self.state = state
         if state != .running {
             currentIteration = 0
+            currentActionIndex = 0
+            totalActionCount = 0
+            activeOptions = nil
+            waitClearTask?.cancel()
+            waitClearTask = nil
+            activeWait = nil
         }
         task = nil
         performer = nil

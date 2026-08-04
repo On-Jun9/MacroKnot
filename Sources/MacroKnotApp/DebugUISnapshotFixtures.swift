@@ -20,6 +20,12 @@ struct DebugUISnapshotRoot: View {
             records = []
         case .mouseHeavy:
             records = Self.mouseHeavyRecords
+        case .layoutStress:
+            records = Self.layoutStressRecords
+        case .playingWait:
+            records = Self.longWaitRecords
+        case .playingDelay:
+            records = Self.longDelayRecords
         default:
             records = Self.previewRecords
         }
@@ -68,10 +74,46 @@ struct DebugUISnapshotRoot: View {
         case .mouseHeavy:
             LibraryView(permissions: permissions)
                 .environmentObject(libraryStore)
+        case .layoutStress:
+            // macOS는 Dynamic Type을 지원하지 않으므로 긴 이름과 다국어 문자열로만 레이아웃을 압박한다.
+            LibraryView(permissions: permissions)
+                .environmentObject(libraryStore)
         case .playing:
             LibraryView(
                 permissions: permissions,
-                previewState: .playing(iteration: 2, repeatCount: 3)
+                previewState: .playing(
+                    iteration: 2,
+                    repeatCount: 3,
+                    actionIndex: 6,
+                    actionCount: 14
+                )
+            )
+            .environmentObject(libraryStore)
+        case .playingWait:
+            // 3번 액션이 대기라서 그 행에 남은 시간이 붙는 상태를 고정한다.
+            LibraryView(
+                permissions: permissions,
+                previewState: .playing(
+                    iteration: 2,
+                    repeatCount: 3,
+                    actionIndex: 3,
+                    actionCount: 14
+                ),
+                previewWaitSeconds: 42
+            )
+            .environmentObject(libraryStore)
+        case .playingDelay:
+            // 4번 액션은 대기 액션이 아니라 실행 전 대기가 긴 더블클릭이다.
+            LibraryView(
+                permissions: permissions,
+                previewState: .playing(
+                    iteration: 2,
+                    repeatCount: 3,
+                    actionIndex: 4,
+                    actionCount: 14
+                ),
+                previewWaitSeconds: 17,
+                previewWaitKind: .delayBeforeAction
             )
             .environmentObject(libraryStore)
         case .playbackOptions:
@@ -205,6 +247,26 @@ struct DebugUISnapshotRoot: View {
         }
     }
 
+    /// 남은 시간 표시를 확인하려면 대기가 충분히 길어야 하므로 3번 액션만 긴 대기로 바꾼다.
+    private static var longWaitRecords: [MacroLibraryRecord] {
+        previewRecords.enumerated().map { index, record in
+            guard index == 0 else { return record }
+            var updated = record
+            updated.document.actions[2] = .wait(milliseconds: 45_000)
+            return updated
+        }
+    }
+
+    /// `실행 전 대기` 표시를 확인하려면 대기 액션이 아닌 4번 액션에 긴 실행 전 대기가 필요하다.
+    private static var longDelayRecords: [MacroLibraryRecord] {
+        previewRecords.enumerated().map { index, record in
+            guard index == 0 else { return record }
+            var updated = record
+            updated.document.actions[3].delayBeforeMilliseconds = 20_000
+            return updated
+        }
+    }
+
     private static var previewDraft: MacroDraftRecord {
         MacroDraftRecord(
             mode: .edit,
@@ -251,6 +313,30 @@ struct DebugUISnapshotRoot: View {
         )
         let date = Date(timeIntervalSince1970: 1_785_346_800)
         return [MacroLibraryRecord(document: document, createdAt: date, modifiedAt: date)]
+    }
+
+    private static var layoutStressRecords: [MacroLibraryRecord] {
+        let documents = [
+            MacroDocument(
+                name: "분기별 고객 지원 현황과 정산 자료를 취합하고 보고서 화면을 캡처하는 매우 긴 자동화",
+                actions: sampleActions,
+                displayConfiguration: DisplayConfigurationProvider.current()
+            ),
+            MacroDocument(
+                name: "Internationalized quarterly reconciliation and reporting workflow",
+                actions: Array(sampleActions.prefix(6)),
+                displayConfiguration: DisplayConfigurationProvider.current()
+            ),
+            MacroDocument(
+                name: "고객 문의 화면 캡처 및 담당 부서 전달",
+                actions: Array(sampleActions.suffix(5)),
+                displayConfiguration: DisplayConfigurationProvider.current()
+            ),
+        ]
+        return documents.enumerated().map { index, document in
+            let date = Date(timeIntervalSince1970: 1_785_346_800 - Double(index * 86_400))
+            return MacroLibraryRecord(document: document, createdAt: date, modifiedAt: date)
+        }
     }
 
     private static var editorDraft: ActionEditorDraft {
@@ -344,8 +430,11 @@ private struct UISnapshotConfiguration {
         case populated
         case recording
         case playing
+        case playingWait = "playing-wait"
+        case playingDelay = "playing-delay"
         case playbackOptions = "playback-options"
         case mouseHeavy = "mouse-heavy"
+        case layoutStress = "layout-stress"
         case error
         case editor
         case macroEditor = "macro-editor"
