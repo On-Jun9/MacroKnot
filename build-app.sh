@@ -44,9 +44,10 @@ if pgrep -f "$bundle_executable" > /dev/null 2>&1; then
     fi
 fi
 
-mkdir -p "$app_path/Contents/MacOS"
+mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 cp "$project_root/Info.plist" "$app_path/Contents/Info.plist"
 cp "$executable_path" "$app_path/Contents/MacOS/MacroKnot"
+cp "$project_root/Resources/MacroKnot.icns" "$app_path/Contents/Resources/MacroKnot.icns"
 codesign \
     --force \
     --sign "$signing_identity" \

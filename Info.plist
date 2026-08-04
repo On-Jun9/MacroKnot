@@ -8,6 +8,8 @@
     <string>MacroKnot</string>
     <key>CFBundleIdentifier</key>
     <string>dev.macroknot.app.local</string>
+    <key>CFBundleIconFile</key>
+    <string>MacroKnot.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
