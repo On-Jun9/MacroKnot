@@ -1,7 +1,41 @@
+import AppKit
 import SwiftUI
+
+private final class MacroKnotApplicationDelegate: NSObject, NSApplicationDelegate {
+    private var mouseDownMonitor: Any?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+            guard let window = event.window,
+                  TextFocusReleasePolicy.shouldRelease(
+                      isEditingText: window.firstResponder is NSTextView,
+                      hitView: {
+                          TextFocusReleasePolicy.hitView(
+                              in: window,
+                              at: event.locationInWindow
+                          )
+                      }
+                  )
+            else {
+                return event
+            }
+
+            window.makeFirstResponder(nil)
+            return event
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let mouseDownMonitor {
+            NSEvent.removeMonitor(mouseDownMonitor)
+        }
+    }
+
+}
 
 @main
 struct MacroKnotApp: App {
+    @NSApplicationDelegateAdaptor(MacroKnotApplicationDelegate.self) private var appDelegate
     @StateObject private var permissions = PermissionState()
     @StateObject private var libraryStore = MacroKnotApp.makeLibraryStore()
 

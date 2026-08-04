@@ -152,6 +152,8 @@ struct ContentView: View {
     @StateObject private var globalCommandMonitor = GlobalCommandMonitor()
     @State private var actionEditorDraft: ActionEditorDraft?
     @State private var selectedActionIDs: Set<UUID>
+    /// 새로 추가한 액션이 목록 밖에 있으면 어디에 들어갔는지 알 수 없어 그 행까지 스크롤한다.
+    @State private var actionToRevealID: UUID?
     @State private var isRepeatRangePresented = false
     @State private var isDeleteAllConfirmationPresented = false
     @State private var isCancelConfirmationPresented = false
@@ -243,21 +245,20 @@ struct ContentView: View {
                 if documentController.document.actions.contains(where: { $0.id == action.id }) {
                     documentController.updateAction(action)
                 } else {
-                    documentController.addAction(action)
+                    documentController.addAction(action, after: selectedActionIDs)
+                    actionToRevealID = action.id
                 }
                 selectedActionIDs = [action.id]
             }
         }
         .sheet(isPresented: $isRepeatRangePresented) {
             RepeatRangeSheet(actions: documentController.document.actions) { start, end, count in
-                try documentController.wrapActionsInRepeat(
+                let wrappedID = try documentController.wrapActionsInRepeat(
                     from: start,
                     through: end,
                     count: count
                 )
-                selectedActionIDs = Set(
-                    documentController.document.actions[start...end].map(\.id)
-                )
+                selectedActionIDs = [wrappedID]
             }
         }
         .alert("모든 액션을 삭제할까요?", isPresented: $isDeleteAllConfirmationPresented) {
@@ -877,6 +878,20 @@ struct ContentView: View {
     }
 
     private var actionList: some View {
+        ScrollViewReader { proxy in
+            actionListContent
+                .onChange(of: actionToRevealID) { _, id in
+                    guard let id else { return }
+                    // 추가된 행은 이 변경과 같은 주기에 만들어지므로 다음 주기에 스크롤한다.
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(id)
+                        actionToRevealID = nil
+                    }
+                }
+        }
+    }
+
+    private var actionListContent: some View {
         List(selection: $selectedActionIDs) {
             ForEach(displayedActions, id: \.action.id) { item in
                 if item.isLive {

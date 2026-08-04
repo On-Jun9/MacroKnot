@@ -116,7 +116,7 @@ func formatsActionSummariesForFastScanning() {
             keyboard,
         ])
 
-    #expect(click.summary == "시작 전 250ms · 화면 좌표 (10, 20)")
+    #expect(click.summary == "실행 전 250ms · 화면 좌표 (10, 20)")
     #expect(drag.summary == "(10, 20) → (90, 120) · 1.5초")
     #expect(keyboard.summary == "“a” · 보조 키 포함 · 누르고 떼기")
     #expect(capture.summary == "창 → MacroKnot 결과")
@@ -143,6 +143,95 @@ func calculatesNestedDurationAndSaturatesOverflow() {
 
     #expect(actions.estimatedDurationMilliseconds == 2_500)
     #expect(overflowing.estimatedDurationMilliseconds == UInt64.max)
+}
+
+@Test
+func formatsFiniteAndInfinitePlaybackProgress() {
+    #expect(
+        PlaybackProgressPresentation.statusText(
+            iteration: 2,
+            repetition: .finite(3),
+            actionIndex: 6,
+            actionCount: 14
+        ) == "반복 2/3 · 액션 6/14"
+    )
+    #expect(
+        PlaybackProgressPresentation.statusText(
+            iteration: 7,
+            repetition: .infinite
+        ) == "반복 7 · 무한 반복"
+    )
+}
+
+@Test
+func separatesWaitActionCountdownFromStartDelayCountdown() {
+    // 재생 속도로 짧아진 대기 액션도 표시가 사라지지 않아야 한다.
+    #expect(
+        PlaybackWaitPresentation.displayedWait(for: .wait(milliseconds: 250))
+            == .waitAction(milliseconds: 250)
+    )
+
+    // 대기 액션에 붙은 실행 전 대기는 그 액션이 끝날 때까지의 시간으로 합친다.
+    var delayedWait = MacroAction.wait(milliseconds: 5_000)
+    delayedWait.delayBeforeMilliseconds = 400
+    #expect(
+        PlaybackWaitPresentation.displayedWait(for: delayedWait)
+            == .waitAction(milliseconds: 5_400)
+    )
+
+    // 대기 액션이 아니면 실행 전 대기만 세고, 종류를 구분해 돌려준다.
+    var slowClick = MacroAction(
+        kind: .click,
+        delayBeforeMilliseconds: 30_000,
+        targetStrategy: .screenCoordinate,
+        mouse: MousePayload(start: ScreenPoint(x: 10, y: 20))
+    )
+    #expect(
+        PlaybackWaitPresentation.displayedWait(for: slowClick)
+            == .delayBeforeAction(milliseconds: 30_000)
+    )
+
+    // 짧은 실행 전 대기는 숫자만 번쩍이므로 표시하지 않는다.
+    slowClick.delayBeforeMilliseconds =
+        PlaybackWaitPresentation.delayDisplayThresholdMilliseconds - 1
+    #expect(PlaybackWaitPresentation.displayedWait(for: slowClick) == nil)
+
+    slowClick.delayBeforeMilliseconds = nil
+    #expect(PlaybackWaitPresentation.displayedWait(for: slowClick) == nil)
+
+    // 합이 표현 범위를 넘으면 재생 중 죽지 않고 최대값으로 포화한다.
+    var overflowingWait = MacroAction.wait(milliseconds: .max)
+    overflowingWait.delayBeforeMilliseconds = 1
+    #expect(
+        PlaybackWaitPresentation.displayedWait(for: overflowingWait)
+            == .waitAction(milliseconds: .max)
+    )
+}
+
+@Test
+func presentsDraftNameAndLastUpdatedTimeForRecovery() {
+    let updatedAt = Date(timeIntervalSince1970: 1_785_346_800)
+    let draft = MacroDraftRecord(
+        mode: .edit,
+        document: MacroDocument(name: "월간 보고서 자동화"),
+        originalCreatedAt: nil,
+        updatedAt: updatedAt
+    )
+
+    var formattedDate: Date?
+    let message = DraftRecoveryPresentation.message(for: draft) { date in
+        formattedDate = date
+        return "2026년 7월 30일 오전 2:40"
+    }
+    #expect(formattedDate == updatedAt)
+    #expect(message == "월간 보고서 자동화 · 마지막 수정: 2026년 7월 30일 오전 2:40")
+
+    var unnamedDraft = draft
+    unnamedDraft.document.name = "  \n"
+    let unnamedMessage = DraftRecoveryPresentation.message(for: unnamedDraft) { _ in
+        "2026년 7월 30일 오전 2:40"
+    }
+    #expect(unnamedMessage == "이름 없는 매크로 · 마지막 수정: 2026년 7월 30일 오전 2:40")
 }
 
 @Test
@@ -185,9 +274,12 @@ func groupsConsecutiveMouseMovesForLibraryPreview() {
 
     #expect(preview.count == 3)
     #expect(preview[0].sourceLabel == "1–3")
+    #expect(preview[0].contains(actionNumber: 2))
+    #expect(!preview[0].contains(actionNumber: 4))
     #expect(preview[0].title == "마우스 이동 ×3")
     #expect(preview[0].summary == "(10, 20) → (30, 40) · 연속 이동 경로")
     #expect(preview[1].kind == .click)
+    #expect(preview[1].contains(actionNumber: 4))
     #expect(preview[2].sourceLabel == "5–6")
 }
 

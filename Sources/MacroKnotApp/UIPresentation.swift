@@ -85,7 +85,7 @@ extension MacroAction {
         guard let delayBeforeMilliseconds, delayBeforeMilliseconds > 0 else {
             return detail
         }
-        return "시작 전 \(MacroDurationFormatter.concise(milliseconds: delayBeforeMilliseconds)) · \(detail)"
+        return "실행 전 \(MacroDurationFormatter.concise(milliseconds: delayBeforeMilliseconds)) · \(detail)"
     }
 
     var estimatedDurationMilliseconds: UInt64 {
@@ -168,6 +168,110 @@ enum MacroDurationFormatter {
     }
 }
 
+enum PlaybackProgressPresentation {
+    static func iterationValue(
+        iteration: Int,
+        repetition: PlaybackOptions.Repetition
+    ) -> String {
+        switch repetition {
+        case .finite(let count):
+            return "\(iteration)/\(count)"
+        case .infinite:
+            return "\(iteration)/∞"
+        }
+    }
+
+    static func iterationText(
+        iteration: Int,
+        repetition: PlaybackOptions.Repetition
+    ) -> String {
+        switch repetition {
+        case .finite(let count):
+            return "반복 \(iteration)/\(count)"
+        case .infinite:
+            return "반복 \(iteration) · 무한 반복"
+        }
+    }
+
+    static func actionValue(actionIndex: Int?, actionCount: Int?) -> String? {
+        guard let actionIndex, let actionCount, actionIndex > 0, actionCount > 0 else {
+            return nil
+        }
+        return "\(actionIndex)/\(actionCount)"
+    }
+
+    static func statusText(
+        iteration: Int,
+        repetition: PlaybackOptions.Repetition,
+        actionIndex: Int? = nil,
+        actionCount: Int? = nil
+    ) -> String {
+        let iterationText = iterationText(iteration: iteration, repetition: repetition)
+        guard let actionValue = actionValue(
+            actionIndex: actionIndex,
+            actionCount: actionCount
+        ) else {
+            return iterationText
+        }
+        return "\(iterationText) · 액션 \(actionValue)"
+    }
+}
+
+enum PlaybackWaitPresentation {
+    /// 남은 시간을 세는 두 가지 원인. 대기 액션과 `실행 전 대기`는 화면에서 다르게 표기한다.
+    enum Wait: Equatable {
+        case waitAction(milliseconds: UInt64)
+        case delayBeforeAction(milliseconds: UInt64)
+    }
+
+    /// 짧은 `실행 전 대기`에서 `0:00`이 번쩍이지 않도록 이 시간 이상만 표시한다.
+    /// 대기 액션에는 적용하지 않으므로 재생 속도로 짧아져도 표시가 사라지지 않는다.
+    static let delayDisplayThresholdMilliseconds: UInt64 = 1_000
+
+    /// 실행 중 남은 시간을 표시할 대상이면 그 종류와 시간을, 아니면 `nil`을 돌려준다.
+    /// 실행 엔진은 액션 시작을 알린 뒤 `실행 전 대기`부터 쉬므로, 대기 액션에 붙은
+    /// `실행 전 대기`는 그 액션이 끝날 때까지의 시간으로 함께 더한다.
+    static func displayedWait(for action: MacroAction) -> Wait? {
+        let delay = action.delayBeforeMilliseconds ?? 0
+        if action.kind == .wait, let milliseconds = action.wait?.milliseconds {
+            let total = milliseconds.addingReportingOverflow(delay)
+            return .waitAction(milliseconds: total.overflow ? .max : total.partialValue)
+        }
+        guard delay >= delayDisplayThresholdMilliseconds else { return nil }
+        return .delayBeforeAction(milliseconds: delay)
+    }
+}
+
+extension PlaybackWaitPresentation.Wait {
+    var milliseconds: UInt64 {
+        switch self {
+        case let .waitAction(milliseconds), let .delayBeforeAction(milliseconds):
+            return milliseconds
+        }
+    }
+
+    var isWaitAction: Bool {
+        if case .waitAction = self { return true }
+        return false
+    }
+}
+
+enum DraftRecoveryPresentation {
+    private static func name(for draft: MacroDraftRecord) -> String {
+        let trimmedName = draft.document.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedName.isEmpty ? "이름 없는 매크로" : trimmedName
+    }
+
+    static func message(
+        for draft: MacroDraftRecord,
+        formatDate: (Date) -> String = {
+            $0.formatted(date: .abbreviated, time: .shortened)
+        }
+    ) -> String {
+        "\(name(for: draft)) · 마지막 수정: \(formatDate(draft.updatedAt))"
+    }
+}
+
 struct MacroActionPreviewItem: Identifiable {
     let id: UUID
     let startIndex: Int
@@ -177,6 +281,11 @@ struct MacroActionPreviewItem: Identifiable {
 
     var kind: MacroAction.Kind { firstAction.kind }
     var count: Int { endIndex - startIndex + 1 }
+
+    func contains(actionNumber: Int) -> Bool {
+        let index = actionNumber - 1
+        return startIndex...endIndex ~= index
+    }
 
     var sourceLabel: String {
         startIndex == endIndex

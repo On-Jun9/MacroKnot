@@ -10,7 +10,7 @@ private enum DraftConflictIntent {
 
 enum LibraryPlaybackPreviewState {
     case live
-    case playing(iteration: Int)
+    case playing(iteration: Int, repeatCount: Int, actionIndex: Int, actionCount: Int)
     case failed(String)
     case configured(rate: Double, repeatCount: Int)
 }
@@ -33,17 +33,36 @@ struct LibraryView: View {
     @State private var draftConflictIntent: DraftConflictIntent?
     @State private var localErrorMessage: String?
     private let previewState: LibraryPlaybackPreviewState
+    private let previewWait: InputPlayer.ActiveWait?
 
     init(
         permissions: PermissionState,
-        previewState: LibraryPlaybackPreviewState = .live
+        previewState: LibraryPlaybackPreviewState = .live,
+        previewWaitSeconds: Double? = nil,
+        previewWaitKind: InputPlayer.ActiveWait.Kind = .waitAction
     ) {
         self.permissions = permissions
         self.previewState = previewState
-        if case .configured(let rate, let repeatCount) = previewState {
+        if let previewWaitSeconds {
+            let start = Date()
+            previewWait = InputPlayer.ActiveWait(
+                kind: previewWaitKind,
+                start: start,
+                end: start.addingTimeInterval(previewWaitSeconds)
+            )
+        } else {
+            previewWait = nil
+        }
+        switch previewState {
+        case .configured(let rate, let repeatCount):
             _playbackRate = State(initialValue: rate)
             _repetitionMode = State(initialValue: .finite)
             _repeatCount = State(initialValue: max(2, repeatCount))
+        case .playing(_, let repeatCount, _, _):
+            _repetitionMode = State(initialValue: .finite)
+            _repeatCount = State(initialValue: max(2, repeatCount))
+        case .live, .failed:
+            break
         }
     }
 
@@ -80,7 +99,7 @@ struct LibraryView: View {
             Button("계속 편집") { openRecoverableDraft() }
             Button("초안 삭제", role: .destructive) { store.discardDraft() }
         } message: {
-            Text("이전에 편집하던 내용을 이어서 작업할 수 있습니다.")
+            Text(draftRecoveryMessage)
         }
         .alert("선택한 매크로를 삭제할까요?", isPresented: $isDeleteConfirmationPresented) {
             Button("삭제", role: .destructive, action: deleteSelectedMacro)
@@ -162,10 +181,6 @@ struct LibraryView: View {
                         .foregroundStyle(.tertiary)
                     Text(searchText.isEmpty ? "저장된 매크로가 없습니다" : "검색 결과가 없습니다")
                         .font(.callout.weight(.medium))
-                    if searchText.isEmpty {
-                        Button("첫 매크로 만들기", action: createMacro)
-                            .buttonStyle(.link)
-                    }
                 }
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -264,15 +279,13 @@ struct LibraryView: View {
                     action: permissions.openScreenCaptureSettings
                 )
             }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    playbackCard(record)
-                    actionPreview(record.document.actions)
-                }
-                .padding(24)
-                .frame(maxWidth: 920)
-                .frame(maxWidth: .infinity)
+            VStack(alignment: .leading, spacing: 22) {
+                playbackCard(record)
+                actionPreview(record.document.actions)
             }
+            .padding(24)
+            .frame(maxWidth: 920, maxHeight: .infinity, alignment: .top)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
         }
     }
@@ -331,7 +344,7 @@ struct LibraryView: View {
                     .keyboardShortcut(.escape, modifiers: .control)
                 } else {
                     Button(action: { startPlayback(record.document) }) {
-                        Label("실행 시작", systemImage: "play.fill")
+                        Label(playbackStartButtonTitle, systemImage: "play.fill")
                             .frame(minWidth: 84)
                     }
                     .buttonStyle(.borderedProminent)
@@ -359,6 +372,7 @@ struct LibraryView: View {
                 .padding(3)
                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
                 .frame(maxWidth: .infinity)
+                .disabled(isPlaybackRunning)
             }
 
             HStack(spacing: 10) {
@@ -397,6 +411,7 @@ struct LibraryView: View {
                 }
                 .padding(3)
                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+                .disabled(isPlaybackRunning)
 
                 if repetitionMode == .finite {
                     HStack(spacing: 0) {
@@ -405,6 +420,7 @@ struct LibraryView: View {
                         } label: {
                             Image(systemName: "minus")
                                 .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
                         }
                         .disabled(repeatCount <= 2)
 
@@ -423,11 +439,13 @@ struct LibraryView: View {
                         } label: {
                             Image(systemName: "plus")
                                 .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
                         }
                         .disabled(repeatCount >= 9_999)
                     }
                     .buttonStyle(.plain)
                     .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+                    .disabled(isPlaybackRunning)
                     .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
@@ -452,6 +470,9 @@ struct LibraryView: View {
 
     private func actionPreview(_ actions: [MacroAction]) -> some View {
         let previewItems = MacroActionPreviewItem.grouped(actions)
+        let activeItemID = isPlaybackRunning
+            ? previewItems.first(where: { $0.contains(actionNumber: displayedActionIndex) })?.id
+            : nil
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("액션 미리보기")
@@ -474,41 +495,44 @@ struct LibraryView: View {
                     in: RoundedRectangle(cornerRadius: 12)
                 )
             } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(previewItems.enumerated()), id: \.element.id) { index, item in
-                        HStack(spacing: 12) {
-                            Text(item.sourceLabel)
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 42, alignment: .trailing)
-                            Image(systemName: item.kind.systemImage)
-                                .foregroundStyle(item.kind.tint)
-                                .frame(width: 26, height: 26)
-                                .background(item.kind.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.title)
-                                    .font(.callout.weight(.medium))
-                                Text(item.summary)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        // 재생 중에는 액션마다 목록이 갱신되므로 보이는 행만 만든다.
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(previewItems.enumerated()), id: \.element.id) { index, item in
+                                ActionPreviewRow(
+                                    item: item,
+                                    isActive: item.id == activeItemID,
+                                    remainingWait: item.id == activeItemID ? displayedWait : nil
+                                )
+                                .id(item.id)
+                                if index < previewItems.count - 1 {
+                                    Divider().padding(.leading, 80)
+                                }
                             }
-                            Spacer()
                         }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        if index < previewItems.count - 1 { Divider().padding(.leading, 80) }
+                        .background(Color(nsColor: .controlBackgroundColor))
                     }
-                }
-                .background(
-                    Color(nsColor: .controlBackgroundColor),
-                    in: RoundedRectangle(cornerRadius: 12)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08))
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08))
+                    }
+                    .onAppear {
+                        guard let activeItemID else { return }
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(activeItemID, anchor: .center)
+                        }
+                    }
+                    .onChange(of: activeItemID) { _, itemID in
+                        guard let itemID else { return }
+                        proxy.scrollTo(itemID, anchor: .center)
+                    }
                 }
             }
         }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .layoutPriority(1)
     }
 
     private func previewCountText(actionCount: Int, itemCount: Int) -> String {
@@ -534,8 +558,33 @@ struct LibraryView: View {
     private var playbackStatus: some View {
         switch displayedPlayerState {
         case .running:
-            Label("\(displayedIteration)번째 실행 중", systemImage: "play.circle.fill")
-                .foregroundStyle(.indigo)
+            let runningTitle = "실행 중"
+            HStack(spacing: 5) {
+                Label(runningTitle, systemImage: "play.circle.fill")
+                    .foregroundStyle(.indigo)
+                PlaybackProgressChip(
+                    title: "반복",
+                    value: PlaybackProgressPresentation.iterationValue(
+                        iteration: displayedIteration,
+                        repetition: displayedRepetition
+                    )
+                )
+                if let actionValue = PlaybackProgressPresentation.actionValue(
+                    actionIndex: displayedActionIndex,
+                    actionCount: displayedActionCount
+                ) {
+                    PlaybackProgressChip(title: "액션", value: actionValue)
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(runningTitle)
+            .accessibilityValue(PlaybackProgressPresentation.statusText(
+                iteration: displayedIteration,
+                repetition: displayedRepetition,
+                actionIndex: displayedActionIndex,
+                actionCount: displayedActionCount
+            ))
+            .accessibilityAddTraits(.updatesFrequently)
         case .completed:
             Label("실행 완료", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
@@ -571,9 +620,41 @@ struct LibraryView: View {
         }
     }
 
+    private var isPlaybackRunning: Bool {
+        displayedPlayerState == .running
+    }
+
+    private var playbackStartButtonTitle: String {
+        if case .failed = displayedPlayerState {
+            return "다시 확인 후 실행"
+        }
+        return "실행 시작"
+    }
+
     private var displayedIteration: Int {
-        if case .playing(let iteration) = previewState { return iteration }
+        if case .playing(let iteration, _, _, _) = previewState { return iteration }
         return player.currentIteration
+    }
+
+    private var displayedRepetition: PlaybackOptions.Repetition {
+        if case .playing(_, let repeatCount, _, _) = previewState {
+            return .finite(repeatCount)
+        }
+        return player.activeOptions?.repetition ?? playbackOptions.repetition
+    }
+
+    private var displayedActionIndex: Int {
+        if case .playing(_, _, let actionIndex, _) = previewState { return actionIndex }
+        return player.currentActionIndex
+    }
+
+    private var displayedActionCount: Int {
+        if case .playing(_, _, _, let actionCount) = previewState { return actionCount }
+        return player.totalActionCount
+    }
+
+    private var displayedWait: InputPlayer.ActiveWait? {
+        previewWait ?? player.activeWait
     }
 
     private var playbackOptions: PlaybackOptions {
@@ -624,6 +705,13 @@ struct LibraryView: View {
     private var isDraftConflictIntentCreate: Bool {
         if case .create = draftConflictIntent { return true }
         return false
+    }
+
+    private var draftRecoveryMessage: String {
+        guard let draft = store.recoverableDraft else {
+            return "이전에 편집하던 내용을 이어서 작업할 수 있습니다."
+        }
+        return DraftRecoveryPresentation.message(for: draft)
     }
 
     private func createMacro() {
@@ -932,10 +1020,101 @@ private struct LibraryRow: View {
             .foregroundStyle(Color(nsColor: .secondaryLabelColor))
             Text(record.modifiedAt.formatted(date: .abbreviated, time: .shortened))
                 .font(.caption2)
-                .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
         }
         .padding(.vertical, 5)
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct PlaybackProgressChip: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .fontWeight(.semibold)
+                .monospacedDigit()
+        }
+        .font(.caption)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+private struct ActionPreviewRow: View {
+    let item: MacroActionPreviewItem
+    let isActive: Bool
+    let remainingWait: InputPlayer.ActiveWait?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(item.sourceLabel)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 42, alignment: .trailing)
+            Image(systemName: item.kind.systemImage)
+                .foregroundStyle(item.kind.tint)
+                .frame(width: 26, height: 26)
+                .background(item.kind.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .font(.callout.weight(.medium))
+                Text(item.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if let remainingWait {
+                HStack(spacing: 4) {
+                    // 대기 액션은 숫자만, 액션에 붙은 `실행 전 대기`는 문구를 붙여 구분한다.
+                    // 행 왼쪽 요약이 총 간격을 `실행 전 20초`로 쓰므로 남은 시간은 다른 말을 쓴다.
+                    if remainingWait.kind == .delayBeforeAction {
+                        Text("실행까지")
+                            .font(.caption)
+                    }
+                    // 남은 시간은 SwiftUI가 직접 세므로 목록 전체를 매초 다시 그리지 않는다.
+                    Text(
+                        timerInterval: remainingWait.start...remainingWait.end,
+                        countsDown: true,
+                        showsHours: false
+                    )
+                    .font(.caption.monospacedDigit())
+                }
+                .foregroundStyle(
+                    remainingWait.kind == .waitAction ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary)
+                )
+                .accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(isActive ? Color.accentColor.opacity(0.09) : Color.clear)
+        .overlay(alignment: .leading) {
+            if isActive {
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 6)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        // 남은 시간 숫자는 매초 바뀌어 낭독을 끊으므로 대기 중이라는 사실만 알린다.
+        .accessibilityValue(accessibilityValue)
+    }
+
+    private var accessibilityValue: String {
+        guard isActive else { return "" }
+        switch remainingWait?.kind {
+        case .none: return "현재 실행 중"
+        case .waitAction: return "현재 실행 중 · 대기 중"
+        case .delayBeforeAction: return "현재 실행 중 · 실행 전 대기 중"
+        }
     }
 }
 

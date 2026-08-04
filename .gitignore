@@ -13,6 +13,7 @@ xcuserdata/
 # Local runtime and test artifacts
 *.log
 MacroKnot-Probe-*.png
+evidence/
 
 # Editor and agent runtime state
 .vscode/

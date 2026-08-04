@@ -26,9 +26,31 @@ swift build \
     --triple arm64-apple-macosx14.0 \
     --product MacroKnotApp
 
-mkdir -p "$app_path/Contents/MacOS"
+# 이전 디버그 인스턴스가 살아 있는 채로 같은 경로의 실행 파일을 덮어쓰면, 그 프로세스가
+# 아직 읽지 않은 코드 페이지를 읽는 순간 커널이 코드 서명 위반으로 SIGKILL한다. 그러면
+# macOS가 "예기치 않게 종료되었습니다" 알림을 띄우고, 그 알림의 `다시 열기`가 또 다음
+# 빌드에서 죽을 인스턴스를 만든다. 덮어쓰기 전에 이 번들의 프로세스만 정리한다.
+# 이 번들을 실행한 프로세스만 잡도록 명령행 시작에 고정한다. 고정하지 않으면 이 경로를
+# 인자로 가진 다른 프로세스(디버거, 로그 세션)까지 함께 종료된다.
+bundle_executable="$app_path/Contents/MacOS/MacroKnot"
+instance_pattern="^${bundle_executable}( |\$)"
+if pgrep -f "$instance_pattern" > /dev/null 2>&1; then
+    echo "실행 중인 이전 디버그 인스턴스를 종료합니다."
+    pkill -f "$instance_pattern" || true
+    for _ in {1..25}; do
+        pgrep -f "$instance_pattern" > /dev/null 2>&1 || break
+        sleep 0.2
+    done
+    if pgrep -f "$instance_pattern" > /dev/null 2>&1; then
+        pkill -9 -f "$instance_pattern" || true
+        sleep 0.5
+    fi
+fi
+
+mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 cp "$project_root/Info.plist" "$app_path/Contents/Info.plist"
 cp "$executable_path" "$app_path/Contents/MacOS/MacroKnot"
+cp "$project_root/Resources/MacroKnot.icns" "$app_path/Contents/Resources/MacroKnot.icns"
 codesign \
     --force \
     --sign "$signing_identity" \

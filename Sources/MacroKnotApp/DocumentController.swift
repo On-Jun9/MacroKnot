@@ -106,10 +106,11 @@ final class DocumentController: ObservableObject {
         document.actions.append(.wait(milliseconds: milliseconds))
     }
 
-    func addAction(_ action: MacroAction) {
+    /// 선택한 액션 바로 다음에 넣는다. 선택이 없으면 목록 끝에 붙인다.
+    func addAction(_ action: MacroAction, after ids: Set<UUID> = []) {
         registerUndoSnapshot(actionName: "액션 추가")
         ensureDisplayConfiguration(for: [action])
-        document.actions.append(action)
+        document.actions.insert(action, at: insertionIndex(after: ids))
         errorMessage = nil
         logActionChange("action_added", action: action)
     }
@@ -125,7 +126,14 @@ final class DocumentController: ObservableObject {
         logActionChange("action_updated", action: action)
     }
 
-    func wrapActionsInRepeat(from startIndex: Int, through endIndex: Int, count: Int) throws {
+    /// 만들어진 반복 블록의 식별자를 돌려준다. 묶은 범위는 액션 하나로 줄어들므로
+    /// 호출한 쪽이 원래 범위를 다시 읽으면 안 된다.
+    @discardableResult
+    func wrapActionsInRepeat(
+        from startIndex: Int,
+        through endIndex: Int,
+        count: Int
+    ) throws -> UUID {
         guard count > 0,
               startIndex >= 0,
               endIndex >= startIndex,
@@ -147,6 +155,7 @@ final class DocumentController: ObservableObject {
                 "repeat_count": String(count),
             ]
         )
+        return repeatAction.id
     }
 
     func validationMessage(for action: MacroAction) -> String? {
@@ -282,13 +291,17 @@ final class DocumentController: ObservableObject {
         return duplicated.map(\.id)
     }
 
+    private func insertionIndex(after ids: Set<UUID>) -> Int {
+        document.actions.lastIndex { ids.contains($0.id) }
+            .map { $0 + 1 } ?? document.actions.endIndex
+    }
+
     private func insertCopies(
         _ copies: [MacroAction],
         after ids: Set<UUID>,
         actionName: String
     ) {
-        let lastSelectedIndex = document.actions.lastIndex { ids.contains($0.id) }
-        let insertionIndex = lastSelectedIndex.map { $0 + 1 } ?? document.actions.endIndex
+        let insertionIndex = insertionIndex(after: ids)
         registerUndoSnapshot(actionName: actionName)
         ensureDisplayConfiguration(for: copies)
         document.actions.insert(contentsOf: copies, at: insertionIndex)

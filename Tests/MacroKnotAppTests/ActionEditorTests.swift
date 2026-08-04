@@ -267,13 +267,18 @@ func preventsDuplicatePlaybackAndReleasesInputsWhenStopped() async {
         name: "재생 상태",
         actions: [
             .keyboard(keyCode: 0, characters: "a", modifierFlags: 0),
+            .wait(milliseconds: 100),
         ]
     )
+    let options = PlaybackOptions(rate: 1.5, repetition: .finite(3))
 
-    player.play(document: document)
-    player.play(document: document)
+    player.play(document: document, options: options)
+    player.play(document: document, options: options)
 
     #expect(player.state == .running)
+    #expect(player.activeOptions == options)
+    #expect(player.currentActionIndex == 1)
+    #expect(player.totalActionCount == 2)
     #expect(stopMonitor.startCount == 1)
     await performer.waitUntilStarted()
     player.stop()
@@ -282,8 +287,77 @@ func preventsDuplicatePlaybackAndReleasesInputsWhenStopped() async {
     }
 
     #expect(player.state == .stopped)
+    #expect(player.activeOptions == nil)
+    #expect(player.currentActionIndex == 0)
+    #expect(player.totalActionCount == 0)
     #expect(await performer.releaseCount == 1)
     #expect(stopMonitor.stopCount == 1)
+}
+
+@MainActor
+@Test
+func reportsCurrentTopLevelActionDuringPlayback() async {
+    let stopMonitor = FakeStopMonitor()
+    let performer = CountingInputPerformer(suspendsAfterCount: 2)
+    let player = InputPlayer(
+        globalStopMonitor: stopMonitor,
+        performerFactory: { performer }
+    )
+    let document = MacroDocument(
+        name: "액션 진행 상태",
+        actions: [
+            .keyboard(keyCode: 0, characters: "a", modifierFlags: 0),
+            .keyboard(keyCode: 11, characters: "b", modifierFlags: 0),
+        ]
+    )
+
+    player.play(document: document)
+    await performer.waitUntilSuspended()
+
+    #expect(player.state == .running)
+    #expect(player.currentActionIndex == 2)
+    #expect(player.totalActionCount == 2)
+
+    player.stop()
+    for _ in 0..<200 where await performer.releaseCount == 0 {
+        await Task.yield()
+    }
+    #expect(player.state == .stopped)
+    #expect(player.currentActionIndex == 0)
+    #expect(player.totalActionCount == 0)
+}
+
+@MainActor
+@Test
+func clearsRemainingWaitAfterTheWaitElapses() async {
+    let stopMonitor = FakeStopMonitor()
+    // 대기 액션에서 멈춰 세워 대기 중 상태를 관찰한다.
+    let performer = CountingInputPerformer(suspendsAfterCount: 1)
+    let player = InputPlayer(
+        globalStopMonitor: stopMonitor,
+        performerFactory: { performer }
+    )
+    let document = MacroDocument(
+        name: "대기 남은 시간",
+        actions: [
+            .wait(milliseconds: 120),
+            .keyboard(keyCode: 0, characters: "a", modifierFlags: 0),
+        ]
+    )
+
+    player.play(document: document)
+    await performer.waitUntilSuspended()
+    #expect(player.activeWait?.kind == .waitAction)
+
+    // 다음 액션 보고를 기다리지 않고 대기 시간이 지나면 표시가 사라져야 한다.
+    try? await Task.sleep(for: .milliseconds(400))
+    #expect(player.activeWait == nil)
+
+    player.stop()
+    for _ in 0..<200 where await performer.releaseCount == 0 {
+        await Task.yield()
+    }
+    #expect(player.state == .stopped)
 }
 
 @MainActor

@@ -44,6 +44,52 @@ func undoAndRedoRestoreActionListAroundAddedAction() {
 
 @MainActor
 @Test
+func addsActionRightAfterSelectionAndAtEndWithoutSelection() {
+    let first = MacroAction.wait(milliseconds: 100)
+    let second = MacroAction.wait(milliseconds: 200)
+    let third = MacroAction.wait(milliseconds: 300)
+    let fixture = EditingFixture(actions: [first, second, third])
+
+    let afterFirst = MacroAction.wait(milliseconds: 400)
+    fixture.controller.addAction(afterFirst, after: [first.id])
+    #expect(
+        fixture.controller.document.actions.map(\.id)
+            == [first.id, afterFirst.id, second.id, third.id]
+    )
+
+    // 여러 개를 고른 상태에서는 마지막으로 선택된 액션 다음에 들어간다.
+    let afterSecond = MacroAction.wait(milliseconds: 500)
+    fixture.controller.addAction(afterSecond, after: [first.id, second.id])
+    #expect(
+        fixture.controller.document.actions.map(\.id)
+            == [first.id, afterFirst.id, second.id, afterSecond.id, third.id]
+    )
+
+    let appended = MacroAction.wait(milliseconds: 600)
+    fixture.controller.addAction(appended, after: [])
+    #expect(fixture.controller.document.actions.last?.id == appended.id)
+}
+
+@MainActor
+@Test
+func wrapsRangeIntoOneRepeatActionAndReturnsItsIdentifier() throws {
+    let actions = (1...4).map { MacroAction.wait(milliseconds: UInt64($0) * 100) }
+    let fixture = EditingFixture(actions: actions)
+
+    // 목록 뒤쪽 두 개를 묶으면 배열이 하나로 줄어든다.
+    let wrappedID = try fixture.controller.wrapActionsInRepeat(from: 2, through: 3, count: 2)
+
+    let result = fixture.controller.document.actions
+    #expect(result.count == 3)
+    #expect(result[2].id == wrappedID)
+    #expect(result[2].kind == .repeatBlock)
+    #expect(result[2].repeatBlock?.actions.map(\.id) == [actions[2].id, actions[3].id])
+    // 묶기 뒤 선택은 이 식별자만 쓰면 되므로 줄어든 배열을 다시 읽을 필요가 없다.
+    #expect(result.map(\.id) == [actions[0].id, actions[1].id, wrappedID])
+}
+
+@MainActor
+@Test
 func undoRestoresOrderAfterMovingActions() {
     let first = MacroAction.wait(milliseconds: 100)
     let second = MacroAction.wait(milliseconds: 200)
