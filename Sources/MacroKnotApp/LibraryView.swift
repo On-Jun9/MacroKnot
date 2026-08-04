@@ -33,13 +33,26 @@ struct LibraryView: View {
     @State private var draftConflictIntent: DraftConflictIntent?
     @State private var localErrorMessage: String?
     private let previewState: LibraryPlaybackPreviewState
+    private let previewWait: InputPlayer.ActiveWait?
 
     init(
         permissions: PermissionState,
-        previewState: LibraryPlaybackPreviewState = .live
+        previewState: LibraryPlaybackPreviewState = .live,
+        previewWaitSeconds: Double? = nil,
+        previewWaitKind: InputPlayer.ActiveWait.Kind = .waitAction
     ) {
         self.permissions = permissions
         self.previewState = previewState
+        if let previewWaitSeconds {
+            let start = Date()
+            previewWait = InputPlayer.ActiveWait(
+                kind: previewWaitKind,
+                start: start,
+                end: start.addingTimeInterval(previewWaitSeconds)
+            )
+        } else {
+            previewWait = nil
+        }
         switch previewState {
         case .configured(let rate, let repeatCount):
             _playbackRate = State(initialValue: rate)
@@ -489,7 +502,8 @@ struct LibraryView: View {
                             ForEach(Array(previewItems.enumerated()), id: \.element.id) { index, item in
                                 ActionPreviewRow(
                                     item: item,
-                                    isActive: item.id == activeItemID
+                                    isActive: item.id == activeItemID,
+                                    remainingWait: item.id == activeItemID ? displayedWait : nil
                                 )
                                 .id(item.id)
                                 if index < previewItems.count - 1 {
@@ -637,6 +651,10 @@ struct LibraryView: View {
     private var displayedActionCount: Int {
         if case .playing(_, _, _, let actionCount) = previewState { return actionCount }
         return player.totalActionCount
+    }
+
+    private var displayedWait: InputPlayer.ActiveWait? {
+        previewWait ?? player.activeWait
     }
 
     private var playbackOptions: PlaybackOptions {
@@ -1031,6 +1049,7 @@ private struct PlaybackProgressChip: View {
 private struct ActionPreviewRow: View {
     let item: MacroActionPreviewItem
     let isActive: Bool
+    let remainingWait: InputPlayer.ActiveWait?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1051,6 +1070,27 @@ private struct ActionPreviewRow: View {
                     .lineLimit(1)
             }
             Spacer()
+            if let remainingWait {
+                HStack(spacing: 4) {
+                    // 대기 액션은 숫자만, 액션에 붙은 `실행 전 대기`는 문구를 붙여 구분한다.
+                    // 행 왼쪽 요약이 총 간격을 `실행 전 20초`로 쓰므로 남은 시간은 다른 말을 쓴다.
+                    if remainingWait.kind == .delayBeforeAction {
+                        Text("실행까지")
+                            .font(.caption)
+                    }
+                    // 남은 시간은 SwiftUI가 직접 세므로 목록 전체를 매초 다시 그리지 않는다.
+                    Text(
+                        timerInterval: remainingWait.start...remainingWait.end,
+                        countsDown: true,
+                        showsHours: false
+                    )
+                    .font(.caption.monospacedDigit())
+                }
+                .foregroundStyle(
+                    remainingWait.kind == .waitAction ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary)
+                )
+                .accessibilityHidden(true)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -1064,7 +1104,17 @@ private struct ActionPreviewRow: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityValue(isActive ? "현재 실행 중" : "")
+        // 남은 시간 숫자는 매초 바뀌어 낭독을 끊으므로 대기 중이라는 사실만 알린다.
+        .accessibilityValue(accessibilityValue)
+    }
+
+    private var accessibilityValue: String {
+        guard isActive else { return "" }
+        switch remainingWait?.kind {
+        case .none: return "현재 실행 중"
+        case .waitAction: return "현재 실행 중 · 대기 중"
+        case .delayBeforeAction: return "현재 실행 중 · 실행 전 대기 중"
+        }
     }
 }
 

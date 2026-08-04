@@ -329,6 +329,39 @@ func reportsCurrentTopLevelActionDuringPlayback() async {
 
 @MainActor
 @Test
+func clearsRemainingWaitAfterTheWaitElapses() async {
+    let stopMonitor = FakeStopMonitor()
+    // 대기 액션에서 멈춰 세워 대기 중 상태를 관찰한다.
+    let performer = CountingInputPerformer(suspendsAfterCount: 1)
+    let player = InputPlayer(
+        globalStopMonitor: stopMonitor,
+        performerFactory: { performer }
+    )
+    let document = MacroDocument(
+        name: "대기 남은 시간",
+        actions: [
+            .wait(milliseconds: 120),
+            .keyboard(keyCode: 0, characters: "a", modifierFlags: 0),
+        ]
+    )
+
+    player.play(document: document)
+    await performer.waitUntilSuspended()
+    #expect(player.activeWait?.kind == .waitAction)
+
+    // 다음 액션 보고를 기다리지 않고 대기 시간이 지나면 표시가 사라져야 한다.
+    try? await Task.sleep(for: .milliseconds(400))
+    #expect(player.activeWait == nil)
+
+    player.stop()
+    for _ in 0..<200 where await performer.releaseCount == 0 {
+        await Task.yield()
+    }
+    #expect(player.state == .stopped)
+}
+
+@MainActor
+@Test
 func repeatsPlaybackForRequestedFiniteCount() async {
     let stopMonitor = FakeStopMonitor()
     let performer = CountingInputPerformer()

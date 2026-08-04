@@ -116,7 +116,7 @@ func formatsActionSummariesForFastScanning() {
             keyboard,
         ])
 
-    #expect(click.summary == "시작 전 250ms · 화면 좌표 (10, 20)")
+    #expect(click.summary == "실행 전 250ms · 화면 좌표 (10, 20)")
     #expect(drag.summary == "(10, 20) → (90, 120) · 1.5초")
     #expect(keyboard.summary == "“a” · 보조 키 포함 · 누르고 떼기")
     #expect(capture.summary == "창 → MacroKnot 결과")
@@ -161,6 +161,43 @@ func formatsFiniteAndInfinitePlaybackProgress() {
             repetition: .infinite
         ) == "반복 7 · 무한 반복"
     )
+}
+
+@Test
+func separatesWaitActionCountdownFromStartDelayCountdown() {
+    // 재생 속도로 짧아진 대기 액션도 표시가 사라지지 않아야 한다.
+    #expect(
+        PlaybackWaitPresentation.displayedWait(for: .wait(milliseconds: 250))
+            == .waitAction(milliseconds: 250)
+    )
+
+    // 대기 액션에 붙은 실행 전 대기는 그 액션이 끝날 때까지의 시간으로 합친다.
+    var delayedWait = MacroAction.wait(milliseconds: 5_000)
+    delayedWait.delayBeforeMilliseconds = 400
+    #expect(
+        PlaybackWaitPresentation.displayedWait(for: delayedWait)
+            == .waitAction(milliseconds: 5_400)
+    )
+
+    // 대기 액션이 아니면 실행 전 대기만 세고, 종류를 구분해 돌려준다.
+    var slowClick = MacroAction(
+        kind: .click,
+        delayBeforeMilliseconds: 30_000,
+        targetStrategy: .screenCoordinate,
+        mouse: MousePayload(start: ScreenPoint(x: 10, y: 20))
+    )
+    #expect(
+        PlaybackWaitPresentation.displayedWait(for: slowClick)
+            == .delayBeforeAction(milliseconds: 30_000)
+    )
+
+    // 짧은 실행 전 대기는 숫자만 번쩍이므로 표시하지 않는다.
+    slowClick.delayBeforeMilliseconds =
+        PlaybackWaitPresentation.delayDisplayThresholdMilliseconds - 1
+    #expect(PlaybackWaitPresentation.displayedWait(for: slowClick) == nil)
+
+    slowClick.delayBeforeMilliseconds = nil
+    #expect(PlaybackWaitPresentation.displayedWait(for: slowClick) == nil)
 }
 
 @Test
