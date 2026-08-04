@@ -72,6 +72,24 @@ func addsActionRightAfterSelectionAndAtEndWithoutSelection() {
 
 @MainActor
 @Test
+func wrapsRangeIntoOneRepeatActionAndReturnsItsIdentifier() throws {
+    let actions = (1...4).map { MacroAction.wait(milliseconds: UInt64($0) * 100) }
+    let fixture = EditingFixture(actions: actions)
+
+    // 목록 뒤쪽 두 개를 묶으면 배열이 하나로 줄어든다.
+    let wrappedID = try fixture.controller.wrapActionsInRepeat(from: 2, through: 3, count: 2)
+
+    let result = fixture.controller.document.actions
+    #expect(result.count == 3)
+    #expect(result[2].id == wrappedID)
+    #expect(result[2].kind == .repeatBlock)
+    #expect(result[2].repeatBlock?.actions.map(\.id) == [actions[2].id, actions[3].id])
+    // 묶기 뒤 선택은 이 식별자만 쓰면 되므로 줄어든 배열을 다시 읽을 필요가 없다.
+    #expect(result.map(\.id) == [actions[0].id, actions[1].id, wrappedID])
+}
+
+@MainActor
+@Test
 func undoRestoresOrderAfterMovingActions() {
     let first = MacroAction.wait(milliseconds: 100)
     let second = MacroAction.wait(milliseconds: 200)
