@@ -253,14 +253,12 @@ struct ContentView: View {
         }
         .sheet(isPresented: $isRepeatRangePresented) {
             RepeatRangeSheet(actions: documentController.document.actions) { start, end, count in
-                try documentController.wrapActionsInRepeat(
+                let wrappedID = try documentController.wrapActionsInRepeat(
                     from: start,
                     through: end,
                     count: count
                 )
-                selectedActionIDs = Set(
-                    documentController.document.actions[start...end].map(\.id)
-                )
+                selectedActionIDs = [wrappedID]
             }
         }
         .alert("모든 액션을 삭제할까요?", isPresented: $isDeleteAllConfirmationPresented) {

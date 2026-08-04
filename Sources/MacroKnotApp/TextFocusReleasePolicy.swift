@@ -5,6 +5,15 @@ import AppKit
 /// 단축키가 편집 창이 아니라 텍스트 필드로 들어가므로 이 판정이 필요하다.
 /// 창과 이벤트 없이 시험할 수 있도록 판정만 떼어 두었다.
 enum TextFocusReleasePolicy {
+    /// 창 좌표의 클릭 지점이 닿은 뷰를 찾는다.
+    /// `hitTest`는 상위 뷰 좌표계의 점을 받고, 콘텐츠 뷰의 상위는 창 프레임이므로 창 좌표를
+    /// 그대로 넘긴다. 콘텐츠 뷰 좌표로 변환해 넘기면 `NSHostingView`처럼 뒤집힌 뷰에서
+    /// 판정 지점이 세로로 뒤집힌다.
+    static func hitView(in window: NSWindow, at pointInWindow: NSPoint) -> NSView? {
+        guard let contentView = window.contentView else { return nil }
+        return contentView.hitTest(pointInWindow)
+    }
+
     /// 클릭이 닿은 뷰부터 위로 올라가며 텍스트 입력 컨트롤인지 확인한다.
     /// SwiftUI 텍스트 필드는 클릭이 내부 자식 뷰에 닿으므로 상위 계층까지 살펴야 한다.
     static func isTextInput(_ view: NSView) -> Bool {

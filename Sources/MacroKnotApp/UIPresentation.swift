@@ -234,7 +234,8 @@ enum PlaybackWaitPresentation {
     static func displayedWait(for action: MacroAction) -> Wait? {
         let delay = action.delayBeforeMilliseconds ?? 0
         if action.kind == .wait, let milliseconds = action.wait?.milliseconds {
-            return .waitAction(milliseconds: milliseconds + delay)
+            let total = milliseconds.addingReportingOverflow(delay)
+            return .waitAction(milliseconds: total.overflow ? .max : total.partialValue)
         }
         guard delay >= delayDisplayThresholdMilliseconds else { return nil }
         return .delayBeforeAction(milliseconds: delay)

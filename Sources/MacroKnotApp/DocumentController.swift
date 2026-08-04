@@ -126,7 +126,14 @@ final class DocumentController: ObservableObject {
         logActionChange("action_updated", action: action)
     }
 
-    func wrapActionsInRepeat(from startIndex: Int, through endIndex: Int, count: Int) throws {
+    /// 만들어진 반복 블록의 식별자를 돌려준다. 묶은 범위는 액션 하나로 줄어들므로
+    /// 호출한 쪽이 원래 범위를 다시 읽으면 안 된다.
+    @discardableResult
+    func wrapActionsInRepeat(
+        from startIndex: Int,
+        through endIndex: Int,
+        count: Int
+    ) throws -> UUID {
         guard count > 0,
               startIndex >= 0,
               endIndex >= startIndex,
@@ -148,6 +155,7 @@ final class DocumentController: ObservableObject {
                 "repeat_count": String(count),
             ]
         )
+        return repeatAction.id
     }
 
     func validationMessage(for action: MacroAction) -> String? {
